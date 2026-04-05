@@ -1,12 +1,8 @@
 import { useEffect, useCallback, useRef } from "react"
+import { Group, Panel, Separator } from "react-resizable-panels"
 import { useWikiStore } from "@/stores/wiki-store"
 import { readFile, writeFile } from "@/commands/fs"
 import { WikiEditor } from "@/components/editor/wiki-editor"
-import {
-  ResizablePanelGroup,
-  ResizablePanel,
-  ResizableHandle,
-} from "@/components/ui/resizable"
 import { ChatBar } from "./chat-bar"
 import { SettingsView } from "@/components/settings/settings-view"
 
@@ -86,16 +82,14 @@ export function ContentArea() {
   }
 
   return (
-    <div className="flex h-full flex-col">
-      <ResizablePanelGroup direction="vertical" className="flex-1">
-        <ResizablePanel defaultSize={60} minSize={30}>
-          {editorContent}
-        </ResizablePanel>
-        <ResizableHandle withHandle />
-        <ResizablePanel defaultSize={40} minSize={20}>
-          <ChatBar />
-        </ResizablePanel>
-      </ResizablePanelGroup>
-    </div>
+    <Group orientation="vertical" className="h-full">
+      <Panel defaultSize={60} minSize={30}>
+        {editorContent}
+      </Panel>
+      <Separator className="h-1.5 cursor-row-resize bg-border/40 transition-colors hover:bg-primary/30" />
+      <Panel defaultSize={40} minSize={20}>
+        <ChatBar />
+      </Panel>
+    </Group>
   )
 }

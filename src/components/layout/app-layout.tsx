@@ -1,11 +1,7 @@
 import { useCallback, useEffect } from "react"
+import { Group, Panel, Separator } from "react-resizable-panels"
 import { useWikiStore } from "@/stores/wiki-store"
 import { listDirectory } from "@/commands/fs"
-import {
-  ResizablePanelGroup,
-  ResizablePanel,
-  ResizableHandle,
-} from "@/components/ui/resizable"
 import { IconSidebar } from "./icon-sidebar"
 import { FileTree } from "./file-tree"
 import { ContentArea } from "./content-area"
@@ -31,15 +27,15 @@ export function AppLayout() {
   return (
     <div className="flex h-screen bg-background text-foreground">
       <IconSidebar />
-      <ResizablePanelGroup direction="horizontal" className="flex-1">
-        <ResizablePanel defaultSize={25} minSize={15} maxSize={40}>
+      <Group orientation="horizontal" className="flex-1">
+        <Panel defaultSize={25} minSize={15} maxSize={40}>
           <FileTree />
-        </ResizablePanel>
-        <ResizableHandle withHandle />
-        <ResizablePanel defaultSize={80}>
+        </Panel>
+        <Separator className="w-1.5 cursor-col-resize bg-border/40 transition-colors hover:bg-primary/30" />
+        <Panel defaultSize={75}>
           <ContentArea />
-        </ResizablePanel>
-      </ResizablePanelGroup>
+        </Panel>
+      </Group>
     </div>
   )
 }
