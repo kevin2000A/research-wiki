@@ -8,6 +8,7 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { streamChat, type ChatMessage as LLMMessage } from "@/lib/llm-client"
 import { executeIngestWrites } from "@/lib/ingest"
 import { listDirectory, readFile } from "@/commands/fs"
+import type { FileNode } from "@/types/wiki"
 
 export function ChatPanel() {
   const messages = useChatStore((s) => s.messages)
@@ -40,29 +41,43 @@ export function ChatPanel() {
       addMessage("user", text)
       setStreaming(true)
 
-      // Build system prompt with wiki context
+      // Build system prompt with wiki context + source file list
       const systemMessages: LLMMessage[] = []
       if (project) {
-        const [index, purpose, schema] = await Promise.all([
+        const [index, purpose] = await Promise.all([
           readFile(`${project.path}/wiki/index.md`).catch(() => ""),
           readFile(`${project.path}/purpose.md`).catch(() => ""),
-          readFile(`${project.path}/schema.md`).catch(() => ""),
         ])
+
+        // Get list of actual source files the user uploaded
+        let sourceFileList = ""
+        try {
+          const sourceTree = await listDirectory(`${project.path}/raw/sources`)
+          const sourceNames = flattenFileNames(sourceTree)
+          sourceFileList = sourceNames.length > 0
+            ? sourceNames.map((n) => `- ${n}`).join("\n")
+            : "(No source files yet)"
+        } catch {
+          sourceFileList = "(No source files yet)"
+        }
+
         systemMessages.push({
           role: "system",
           content: [
             "You are a knowledgeable wiki assistant. Answer questions based ONLY on the wiki's actual content.",
             "",
             "## Citation Rules (CRITICAL)",
-            "- Use [[wikilink]] syntax ONLY for pages that actually exist in the Wiki Index below.",
-            "- NEVER invent or hallucinate page names. If a page doesn't exist in the index, don't link to it.",
+            "- Your answers are derived from the user's uploaded source documents.",
+            "- At the end of your answer, under '**References:**', list ONLY the actual source files (from the Source Files list below) that your answer draws from.",
+            "- Use the exact file names from the list. NEVER invent file names.",
             "- If the wiki doesn't have enough information to answer, say so honestly.",
-            "- At the end of your answer, list the actual wiki pages you referenced under '**Sources:**'",
+            "- You may use [[wikilink]] syntax to reference wiki pages listed in the index.",
             "",
             "Use markdown formatting for clarity.",
             "",
             purpose ? `## Wiki Purpose\n${purpose}` : "",
-            index ? `## Wiki Index (ONLY reference pages listed here)\n${index}` : "## Wiki Index\n(No pages yet)",
+            `## Source Files (user's uploaded documents)\n${sourceFileList}`,
+            index ? `## Wiki Index\n${index}` : "",
           ].filter(Boolean).join("\n"),
         })
       }
@@ -162,4 +177,16 @@ export function ChatPanel() {
       />
     </div>
   )
+}
+
+function flattenFileNames(nodes: FileNode[]): string[] {
+  const names: string[] = []
+  for (const node of nodes) {
+    if (node.is_dir && node.children) {
+      names.push(...flattenFileNames(node.children))
+    } else if (!node.is_dir) {
+      names.push(node.name)
+    }
+  }
+  return names
 }
