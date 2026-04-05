@@ -128,16 +128,26 @@ function processWikiLinks(text: string): string {
 function SourceRef({ fileName }: { fileName: string }) {
   const project = useWikiStore((s) => s.project)
   const setSelectedFile = useWikiStore((s) => s.setSelectedFile)
+  const setFileContent = useWikiStore((s) => s.setFileContent)
   const setActiveView = useWikiStore((s) => s.setActiveView)
 
-  const handleClick = useCallback((e: React.MouseEvent) => {
+  const handleClick = useCallback(async (e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
     if (!project) return
     const path = `${project.path}/raw/sources/${fileName}`
-    setSelectedFile(path)
+    // Switch to wiki view first, then set file and content
     setActiveView("wiki")
-  }, [project, fileName, setSelectedFile, setActiveView])
+    // Small delay to ensure view has switched before setting file
+    await new Promise((r) => setTimeout(r, 50))
+    setSelectedFile(path)
+    try {
+      const content = await readFile(path)
+      setFileContent(content)
+    } catch {
+      setFileContent(`Unable to load: ${fileName}`)
+    }
+  }, [project, fileName, setSelectedFile, setFileContent, setActiveView])
 
   return (
     <button

@@ -25,14 +25,11 @@ export function ContentArea() {
 
     const category = getFileCategory(selectedFile)
 
-    // Don't try to read binary files as text
     if (isBinary(category)) {
       setFileContent("")
       return
     }
 
-    // For PDF, read_file extracts text on Rust side
-    // For text/code/data/markdown, read as text
     readFile(selectedFile)
       .then(setFileContent)
       .catch((err) => setFileContent(`Error loading file: ${err}`))
@@ -57,48 +54,50 @@ export function ContentArea() {
     }
   }, [])
 
-  if (activeView === "settings") {
-    return <SettingsView />
-  }
-
-  if (activeView === "sources") {
-    return <SourcesView />
-  }
-
-  if (activeView === "review") {
-    return <ReviewView />
-  }
-
-  const category = selectedFile ? getFileCategory(selectedFile) : null
-
-  const editorContent = (
-    <div className="h-full min-w-0 overflow-auto">
-      {selectedFile ? (
-        category === "markdown" ? (
-          <WikiEditor
-            key={selectedFile}
-            content={fileContent}
-            onSave={handleSave}
-          />
-        ) : (
-          <FilePreview
-            key={selectedFile}
-            filePath={selectedFile}
-            textContent={fileContent}
-          />
+  // Render the main view content based on activeView
+  function renderMainContent() {
+    switch (activeView) {
+      case "settings":
+        return <SettingsView />
+      case "sources":
+        return <SourcesView />
+      case "review":
+        return <ReviewView />
+      default: {
+        // Wiki view: show editor or file preview
+        const category = selectedFile ? getFileCategory(selectedFile) : null
+        return (
+          <div className="h-full min-w-0 overflow-auto">
+            {selectedFile ? (
+              category === "markdown" ? (
+                <WikiEditor
+                  key={selectedFile}
+                  content={fileContent}
+                  onSave={handleSave}
+                />
+              ) : (
+                <FilePreview
+                  key={selectedFile}
+                  filePath={selectedFile}
+                  textContent={fileContent}
+                />
+              )
+            ) : (
+              <div className="flex h-full items-center justify-center text-muted-foreground">
+                Select a file from the tree to view
+              </div>
+            )}
+          </div>
         )
-      ) : (
-        <div className="flex h-full items-center justify-center text-muted-foreground">
-          Select a file from the tree to view
-        </div>
-      )}
-    </div>
-  )
+      }
+    }
+  }
 
+  // Chat bar is always visible at the bottom, regardless of activeView
   if (!chatExpanded) {
     return (
       <div className="flex h-full min-w-0 flex-col overflow-hidden">
-        <div className="flex-1 overflow-hidden">{editorContent}</div>
+        <div className="flex-1 overflow-hidden">{renderMainContent()}</div>
         <ChatBar />
       </div>
     )
@@ -106,7 +105,7 @@ export function ContentArea() {
 
   return (
     <div className="flex h-full min-w-0 flex-col overflow-hidden">
-      <div className="flex-1 overflow-hidden">{editorContent}</div>
+      <div className="flex-1 overflow-hidden">{renderMainContent()}</div>
       <div className="h-1.5 shrink-0 cursor-row-resize bg-border/40 transition-colors hover:bg-primary/30" />
       <div className="h-64 shrink-0 overflow-hidden">
         <ChatBar />
