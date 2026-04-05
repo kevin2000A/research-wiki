@@ -5,9 +5,9 @@ import { ChatMessage, StreamingMessage } from "./chat-message"
 import { ChatInput } from "./chat-input"
 import { useChatStore, chatMessagesToLLM } from "@/stores/chat-store"
 import { useWikiStore } from "@/stores/wiki-store"
-import { streamChat } from "@/lib/llm-client"
+import { streamChat, type ChatMessage as LLMMessage } from "@/lib/llm-client"
 import { executeIngestWrites } from "@/lib/ingest"
-import { listDirectory } from "@/commands/fs"
+import { listDirectory, readFile } from "@/commands/fs"
 
 export function ChatPanel() {
   const messages = useChatStore((s) => s.messages)
@@ -40,8 +40,31 @@ export function ChatPanel() {
       addMessage("user", text)
       setStreaming(true)
 
+      // Build system prompt with wiki context
+      const systemMessages: LLMMessage[] = []
+      if (project) {
+        const [index, purpose, schema] = await Promise.all([
+          readFile(`${project.path}/wiki/index.md`).catch(() => ""),
+          readFile(`${project.path}/purpose.md`).catch(() => ""),
+          readFile(`${project.path}/schema.md`).catch(() => ""),
+        ])
+        systemMessages.push({
+          role: "system",
+          content: [
+            "You are a knowledgeable wiki assistant. Answer questions using the wiki's content.",
+            "When you reference wiki pages, use [[wikilink]] syntax (e.g., [[entity-name]], [[concept-name]]).",
+            "Always cite which wiki pages your answer draws from.",
+            "Use markdown formatting for clarity.",
+            "",
+            purpose ? `## Wiki Purpose\n${purpose}` : "",
+            schema ? `## Wiki Schema\n${schema}` : "",
+            index ? `## Wiki Index\n${index}` : "",
+          ].filter(Boolean).join("\n"),
+        })
+      }
+
       const allMessages = useChatStore.getState().messages
-      const llmMessages = chatMessagesToLLM(allMessages)
+      const llmMessages = [...systemMessages, ...chatMessagesToLLM(allMessages)]
 
       const controller = new AbortController()
       abortRef.current = controller
