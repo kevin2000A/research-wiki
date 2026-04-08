@@ -17,7 +17,6 @@ const NAV_ITEMS: { view: NavView; icon: typeof FileText; labelKey: string }[] = 
   { view: "graph", icon: Network, labelKey: "nav.graph" },
   { view: "lint", icon: ClipboardCheck, labelKey: "nav.lint" },
   { view: "review", icon: ClipboardList, labelKey: "nav.review" },
-  { view: "settings", icon: Settings, labelKey: "nav.settings" },
 ]
 
 interface IconSidebarProps {
@@ -36,6 +35,7 @@ export function IconSidebar({ onSwitchProject }: IconSidebarProps) {
   return (
     <TooltipProvider delayDuration={300}>
       <div className="flex h-full w-12 flex-col items-center border-r bg-muted/50 py-2">
+        {/* Top: main nav items + Deep Research */}
         <div className="flex flex-1 flex-col items-center gap-1">
           {NAV_ITEMS.map(({ view, icon: Icon, labelKey }) => (
             <Tooltip key={view}>
@@ -60,8 +60,7 @@ export function IconSidebar({ onSwitchProject }: IconSidebarProps) {
               </TooltipContent>
             </Tooltip>
           ))}
-        </div>
-        <div className="flex flex-col items-center gap-1 pb-1">
+          {/* Deep Research — same row as other nav items */}
           <Tooltip>
             <TooltipTrigger
               onClick={() => toggleResearchPanel(!researchPanelOpen)}
@@ -79,6 +78,22 @@ export function IconSidebar({ onSwitchProject }: IconSidebarProps) {
               )}
             </TooltipTrigger>
             <TooltipContent side="right">Deep Research</TooltipContent>
+          </Tooltip>
+        </div>
+        {/* Bottom: settings + switch project */}
+        <div className="flex flex-col items-center gap-1 pb-1">
+          <Tooltip>
+            <TooltipTrigger
+              onClick={() => setActiveView("settings")}
+              className={`flex h-10 w-10 items-center justify-center rounded-md transition-colors ${
+                activeView === "settings"
+                  ? "bg-accent text-accent-foreground"
+                  : "text-muted-foreground hover:bg-accent/50 hover:text-accent-foreground"
+              }`}
+            >
+              <Settings className="h-5 w-5" />
+            </TooltipTrigger>
+            <TooltipContent side="right">{t("nav.settings")}</TooltipContent>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger
