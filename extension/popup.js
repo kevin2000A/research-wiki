@@ -259,6 +259,11 @@ function resizePreview() {
 
 (async () => {
   const connected = await checkConnection();
-  if (connected) await extractContent();
+  // Always extract content so user can preview, even if app not running
+  await extractContent();
+  if (!connected) {
+    clipBtn.disabled = true;
+    clipBtn.textContent = "📎 App not running — cannot save";
+  }
   setTimeout(resizePreview, 100);
 })();
