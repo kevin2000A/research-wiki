@@ -1,15 +1,16 @@
-import { useEffect, useCallback, useState, useRef } from "react"
+import { useEffect, useCallback, useState, useRef, type ChangeEvent } from "react"
 import Graph from "graphology"
 import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from "@react-sigma/core"
 import "@react-sigma/core/lib/style.css"
 import forceAtlas2 from "graphology-layout-forceatlas2"
-import { Network, RefreshCw, ZoomIn, ZoomOut, Maximize, Layers, Tag, Lightbulb, AlertTriangle, Link2, X, Search } from "lucide-react"
+import { Network, RefreshCw, ZoomIn, ZoomOut, Maximize, Layers, Tag, Lightbulb, AlertTriangle, Link2, X, Search, Loader2, Pencil } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useWikiStore } from "@/stores/wiki-store"
 import { readFile } from "@/commands/fs"
 import { buildWikiGraph, type GraphNode, type GraphEdge, type CommunityInfo } from "@/lib/wiki-graph"
 import { findSurprisingConnections, detectKnowledgeGaps, type SurprisingConnection, type KnowledgeGap } from "@/lib/graph-insights"
 import { queueResearch } from "@/lib/deep-research"
+import { optimizeResearchTopic, type OptimizedTopic } from "@/lib/optimize-research-topic"
 import { normalizePath } from "@/lib/path-utils"
 
 const NODE_TYPE_COLORS: Record<string, string> = {
@@ -310,6 +311,12 @@ export function GraphView() {
   const [showInsights, setShowInsights] = useState(false)
   const [highlightedNodes, setHighlightedNodes] = useState<Set<string>>(new Set())
   const [dismissedInsights, setDismissedInsights] = useState<Set<string>>(new Set())
+  // Research confirmation dialog
+  const [researchDialog, setResearchDialog] = useState<{
+    loading: boolean
+    topic: string
+    queries: string[]
+  } | null>(null)
   const lastLoadedVersion = useRef(-1)
 
   const loadGraph = useCallback(async () => {
@@ -352,6 +359,50 @@ export function GraphView() {
     },
     [nodes, setSelectedFile, setFileContent],
   )
+
+  const handleResearchClick = useCallback(async (gapTitle: string, gapDescription: string, gapType: string) => {
+    const store = useWikiStore.getState()
+    if (!store.project) return
+    const pp = normalizePath(store.project.path)
+
+    // Show loading state
+    setResearchDialog({ loading: true, topic: "", queries: [] })
+
+    try {
+      // Read overview and purpose for context
+      let overview = ""
+      let purpose = ""
+      try { overview = await readFile(`${pp}/wiki/overview.md`) } catch {}
+      try { purpose = await readFile(`${pp}/purpose.md`) } catch {}
+
+      const result = await optimizeResearchTopic(
+        store.llmConfig,
+        gapTitle,
+        gapDescription,
+        gapType,
+        overview,
+        purpose,
+      )
+      setResearchDialog({ loading: false, topic: result.topic, queries: result.searchQueries })
+    } catch {
+      // Fallback: use raw title
+      setResearchDialog({ loading: false, topic: gapTitle, queries: [gapTitle] })
+    }
+  }, [])
+
+  const handleResearchConfirm = useCallback(() => {
+    if (!researchDialog) return
+    const store = useWikiStore.getState()
+    if (!store.project) return
+    queueResearch(
+      normalizePath(store.project.path),
+      researchDialog.topic,
+      store.llmConfig,
+      store.searchApiConfig,
+      researchDialog.queries,
+    )
+    setResearchDialog(null)
+  }, [researchDialog])
 
   // Count nodes by type for legend
   const typeCounts = nodes.reduce<Record<string, number>>((acc, n) => {
@@ -674,14 +725,7 @@ export function GraphView() {
                             className="h-7 text-xs gap-1"
                             onClick={(e) => {
                               e.stopPropagation()
-                              const store = useWikiStore.getState()
-                              if (!store.project) return
-                              queueResearch(
-                                normalizePath(store.project.path),
-                                researchTopic,
-                                store.llmConfig,
-                                store.searchApiConfig,
-                              )
+                              handleResearchClick(gap.title, gap.description, gap.type)
                             }}
                           >
                             <Search className="h-3.5 w-3.5" />
@@ -697,6 +741,86 @@ export function GraphView() {
           </div>
         )}
       </div>
+
+      {/* Research Topic Confirmation Dialog */}
+      {researchDialog && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="w-[480px] rounded-lg border bg-background shadow-xl">
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <div className="flex items-center gap-2">
+                <Search className="h-4 w-4 text-primary" />
+                <span className="font-medium text-sm">Deep Research</span>
+              </div>
+              {!researchDialog.loading && (
+                <button
+                  className="p-1 rounded hover:bg-muted text-muted-foreground"
+                  onClick={() => setResearchDialog(null)}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+
+            {researchDialog.loading ? (
+              <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Generating research topic...
+              </div>
+            ) : (
+              <div className="p-4">
+                <div className="mb-3">
+                  <label className="text-xs font-medium text-muted-foreground mb-1 block">Research Topic</label>
+                  <input
+                    type="text"
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                    value={researchDialog.topic}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      setResearchDialog((prev) =>
+                        prev ? { ...prev, topic: e.target.value } : prev
+                      )
+                    }
+                  />
+                </div>
+                <div className="mb-4">
+                  <label className="text-xs font-medium text-muted-foreground mb-1 block">Search Queries</label>
+                  <div className="flex flex-col gap-1.5">
+                    {researchDialog.queries.map((q, idx) => (
+                      <input
+                        key={idx}
+                        type="text"
+                        className="w-full rounded-md border bg-background px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+                        value={q}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                          setResearchDialog((prev) => {
+                            if (!prev) return prev
+                            const newQueries = [...prev.queries]
+                            newQueries[idx] = e.target.value
+                            return { ...prev, queries: newQueries }
+                          })
+                        }
+                      />
+                    ))}
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setResearchDialog(null)}>
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="default"
+                    size="sm"
+                    className="gap-1"
+                    onClick={handleResearchConfirm}
+                  >
+                    <Search className="h-3.5 w-3.5" />
+                    Start Research
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
     </div>
   )
