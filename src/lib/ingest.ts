@@ -12,6 +12,23 @@ const FILE_BLOCK_REGEX = /---FILE:\s*([^\n-]+?)\s*---\n([\s\S]*?)---END FILE---/
 
 export const LANGUAGE_RULE = "## Language Rule\n- ALWAYS match the language of the source document. If the source is in Chinese, write in Chinese. If in English, write in English. Wiki page titles, content, and descriptions should all be in the same language as the source material."
 
+const ARXIV_PAPER_ANALYSIS_RULE = [
+  "## arXiv Paper Rule",
+  "- This source is a combined arXiv paper bundle when it has `type: arxiv-paper` frontmatter.",
+  "- Treat `## Paper Content` as the primary evidence from the paper source/PDF.",
+  "- Treat `## alphaXiv Overview` as a useful secondary overview, not a substitute for the paper.",
+  "- Extract paper-specific structure: problem, motivation, method, architecture or algorithm, experiments, datasets, metrics, results, ablations, limitations, figures/tables, and follow-up questions.",
+  "- If `## Original Artifact` reports PDF fallback or a source conversion error, preserve uncertainty about missing layout, figures, equations, or appendices.",
+].join("\n")
+
+const ARXIV_PAPER_GENERATION_RULE = [
+  "## arXiv Paper Output Rule",
+  "- For arXiv paper bundles, the source summary page should read like a paper note.",
+  "- Include sections for Problem, Method, Experiments, Key Results, Evidence, Limitations, and Open Questions when supported by the source.",
+  "- Use figure paths, captions, tables, equations, metrics, and dataset names as evidence signals when present.",
+  "- Do not let alphaXiv overview override contradictions or details in the original paper content.",
+].join("\n")
+
 /**
  * Auto-ingest: reads source → LLM analyzes → LLM writes wiki pages, all in one go.
  * Used when importing new files.
@@ -43,6 +60,7 @@ export async function autoIngest(
     tryReadFile(`${pp}/wiki/index.md`),
     tryReadFile(`${pp}/wiki/overview.md`),
   ])
+  const arxivPaper = isArxivPaperSource(sourceContent)
 
   // ── Cache check: skip re-ingest if source content hasn't changed ──
   const cachedFiles = await checkIngestCache(pp, fileName, sourceContent)
@@ -69,7 +87,7 @@ export async function autoIngest(
   await streamChat(
     llmConfig,
     [
-      { role: "system", content: buildAnalysisPrompt(purpose, index) },
+      { role: "system", content: buildAnalysisPrompt(purpose, index, arxivPaper) },
       { role: "user", content: `Analyze this source document:\n\n**File:** ${fileName}${folderContext ? `\n**Folder context:** ${folderContext}` : ""}\n\n---\n\n${truncatedContent}` },
     ],
     {
@@ -95,7 +113,7 @@ export async function autoIngest(
   await streamChat(
     llmConfig,
     [
-      { role: "system", content: buildGenerationPrompt(schema, purpose, index, fileName, overview, currentDate) },
+      { role: "system", content: buildGenerationPrompt(schema, purpose, index, fileName, overview, currentDate, arxivPaper) },
       {
         role: "user",
         content: [
@@ -325,12 +343,14 @@ function parseReviewBlocks(
  * Step 1 prompt: AI reads the source and produces a structured analysis.
  * This is the "discussion" step — the AI reasons about the source before writing wiki pages.
  */
-function buildAnalysisPrompt(purpose: string, index: string): string {
+function buildAnalysisPrompt(purpose: string, index: string, arxivPaper = false): string {
   return [
     "You are an expert research analyst. Read the source document and produce a structured analysis.",
     "",
     LANGUAGE_RULE,
     "",
+    arxivPaper ? ARXIV_PAPER_ANALYSIS_RULE : "",
+    arxivPaper ? "" : "",
     "Your analysis should cover:",
     "",
     "## Key Entities",
@@ -375,7 +395,7 @@ function buildAnalysisPrompt(purpose: string, index: string): string {
 /**
  * Step 2 prompt: AI takes its own analysis and generates wiki files + review items.
  */
-function buildGenerationPrompt(schema: string, purpose: string, index: string, sourceFileName: string, overview: string | undefined, currentDate: string): string {
+function buildGenerationPrompt(schema: string, purpose: string, index: string, sourceFileName: string, overview: string | undefined, currentDate: string, arxivPaper = false): string {
   // Use original filename (without extension) as the source summary page name
   const sourceBaseName = sourceFileName.replace(/\.[^.]+$/, "")
 
@@ -384,6 +404,8 @@ function buildGenerationPrompt(schema: string, purpose: string, index: string, s
     "",
     LANGUAGE_RULE,
     "",
+    arxivPaper ? ARXIV_PAPER_GENERATION_RULE : "",
+    arxivPaper ? "" : "",
     `## IMPORTANT: Source File`,
     `The original source file is: **${sourceFileName}**`,
     `All wiki pages generated from this source MUST include this filename in their frontmatter \`sources\` field.`,
@@ -482,6 +504,10 @@ async function tryReadFile(path: string): Promise<string> {
   } catch {
     return ""
   }
+}
+
+function isArxivPaperSource(content: string): boolean {
+  return /^type:\s*arxiv-paper\s*$/m.test(content) || content.includes("\n## alphaXiv Overview\n")
 }
 
 export async function startIngest(

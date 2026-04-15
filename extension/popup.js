@@ -61,12 +61,12 @@ function updateActionState() {
   if (currentMode === "paper") {
     const arxivId = parseArxivInput(paperInput.value || pageUrl);
     clipBtn.disabled = !arxivId || !projectSelect.value;
-    clipBtn.textContent = "📄 Save arXiv Paper";
+    clipBtn.textContent = "📄 Save Paper Bundle";
     return;
   }
 
   clipBtn.disabled = !extractedContent || !projectSelect.value;
-  clipBtn.textContent = "📎 Clip to Wiki";
+  clipBtn.textContent = "📎 Save Raw Source";
 }
 
 function updatePaperPreview() {
@@ -83,6 +83,7 @@ function updatePaperPreview() {
     `alphaXiv overview: ${urls.overview}`,
     `Source: ${urls.source}`,
     `PDF fallback: ${urls.pdf}`,
+    `Raw bundle: ${safeArxivFileStem(arxivId)}-paper.md`,
   ].join("\n");
   updateActionState();
 }
@@ -786,7 +787,7 @@ async function sendPaper() {
     const data = await res.json();
     if (data.ok) {
       const projectName = projectSelect.options[projectSelect.selectedIndex]?.textContent || "project";
-      setStatus("success", `✓ Saved ${artifact.fileName} to ${projectName}`);
+      setStatus("success", `✓ Saved paper bundle ${data.paperPath || artifact.fileName} to ${projectName}`);
       clipBtn.textContent = "✓ Saved!";
     } else {
       setStatus("error", `✗ Error: ${data.error}`);

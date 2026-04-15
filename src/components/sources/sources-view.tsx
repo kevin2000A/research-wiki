@@ -461,8 +461,9 @@ async function getUniqueDestPath(dir: string, fileName: string): Promise<string>
 }
 
 function filterTree(nodes: FileNode[]): FileNode[] {
+  const names = new Set(nodes.map((n) => n.name.toLowerCase()))
   return nodes
-    .filter((n) => !n.name.startsWith("."))
+    .filter((n) => !n.name.startsWith(".") && !isHiddenPaperArtifact(n, names))
     .map((n) => {
       if (n.is_dir && n.children) {
         return { ...n, children: filterTree(n.children) }
@@ -470,6 +471,18 @@ function filterTree(nodes: FileNode[]): FileNode[] {
       return n
     })
     .filter((n) => !n.is_dir || (n.children && n.children.length > 0))
+}
+
+function isHiddenPaperArtifact(node: FileNode, siblingNames: Set<string>): boolean {
+  if (node.is_dir) return false
+  const lower = node.name.toLowerCase()
+  if (lower.endsWith("-source.tar.gz")) return true
+  if (!lower.endsWith(".pdf")) return false
+  const stem = lower.slice(0, -4)
+  const looksLikeArxivId =
+    /^\d{4}\.\d{4,5}(?:v\d+)?$/.test(stem) ||
+    /^[a-z-]+(?:\.[a-z]+)?-\d{7}(?:v\d+)?$/i.test(stem)
+  return looksLikeArxivId && siblingNames.has(`${stem}-paper.md`)
 }
 
 function countFiles(nodes: FileNode[]): number {
