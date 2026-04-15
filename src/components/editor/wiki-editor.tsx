@@ -22,9 +22,14 @@ function WikiEditorInner({ content, onSave }: WikiEditorInnerProps) {
       Editor.make()
         .config(nord)
         .config((ctx) => {
+          let canSave = false
+          window.setTimeout(() => {
+            canSave = true
+          }, 1000)
           ctx.set(rootCtx, root)
           ctx.set(defaultValueCtx, content)
           ctx.get(listenerCtx).markdownUpdated((_ctx, markdown) => {
+            if (!canSave) return
             onSave(markdown)
           })
         })
