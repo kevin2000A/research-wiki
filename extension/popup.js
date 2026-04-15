@@ -14,6 +14,7 @@ const paperInput = document.getElementById("paperInput");
 const paperPreview = document.getElementById("paperPreview");
 
 let extractedContent = "";
+let extractedAssets = [];
 let pageUrl = "";
 let activeTabId = null;
 let appConnected = false;
@@ -178,6 +179,7 @@ async function extractContent() {
   if (!activeTabId) return;
   webExtractionStarted = true;
   extractedContent = "";
+  extractedAssets = [];
   contentPreview.textContent = "Extracting content...";
   updateActionState();
 
@@ -192,6 +194,83 @@ async function extractContent() {
       func: () => {
         try {
           const documentClone = document.cloneNode(true);
+          const pageBaseUrl = document.baseURI || location.href;
+
+          function toAbsoluteUrl(raw) {
+            const value = (raw || "").trim();
+            if (!value || value.startsWith("data:") || value.startsWith("blob:")) return "";
+            return new URL(value, pageBaseUrl).href;
+          }
+
+          function bestSrcFromSet(srcset) {
+            const candidates = (srcset || "")
+              .split(",")
+              .map((part) => {
+                const pieces = part.trim().split(/\s+/);
+                const url = pieces[0] || "";
+                const descriptor = pieces[1] || "0w";
+                const score = parseFloat(descriptor) || 0;
+                return { url, score };
+              })
+              .filter((item) => item.url);
+            candidates.sort((a, b) => b.score - a.score);
+            return candidates[0]?.url || "";
+          }
+
+          function imageSource(img) {
+            const directAttrs = ["src", "data-src", "data-original", "data-lazy-src", "data-url"];
+            for (const attr of directAttrs) {
+              const absolute = toAbsoluteUrl(img.getAttribute(attr));
+              if (absolute) return absolute;
+            }
+            const srcset = img.getAttribute("srcset") || img.getAttribute("data-srcset") || "";
+            return toAbsoluteUrl(bestSrcFromSet(srcset));
+          }
+
+          function mathNode(tex, display) {
+            const node = documentClone.createElement(display ? "div" : "span");
+            node.setAttribute("data-llm-math", tex.trim());
+            node.setAttribute("data-llm-display", display ? "true" : "false");
+            node.textContent = display ? `$$\n${tex.trim()}\n$$` : `$${tex.trim()}$`;
+            return node;
+          }
+
+          documentClone.querySelectorAll('script[type^="math/tex"]').forEach((node) => {
+            const tex = node.textContent || "";
+            const display = (node.getAttribute("type") || "").includes("mode=display");
+            if (tex.trim()) node.replaceWith(mathNode(tex, display));
+          });
+
+          documentClone.querySelectorAll(".katex").forEach((node) => {
+            if (node.closest("[data-llm-math]")) return;
+            const annotation = node.querySelector('annotation[encoding="application/x-tex"]');
+            const tex = annotation?.textContent || "";
+            if (!tex.trim()) return;
+            node.replaceWith(mathNode(tex, Boolean(node.closest(".katex-display"))));
+          });
+
+          documentClone.querySelectorAll("math").forEach((node) => {
+            const annotation = node.querySelector('annotation[encoding="application/x-tex"]');
+            const tex = annotation?.textContent || "";
+            if (tex.trim()) node.replaceWith(mathNode(tex, node.getAttribute("display") === "block"));
+          });
+
+          documentClone.querySelectorAll("a[href]").forEach((a) => {
+            const href = toAbsoluteUrl(a.getAttribute("href"));
+            if (href) a.setAttribute("href", href);
+          });
+
+          documentClone.querySelectorAll("img").forEach((img) => {
+            const w = parseInt(img.getAttribute("width") || "999");
+            const h = parseInt(img.getAttribute("height") || "999");
+            if (w < 10 || h < 10) {
+              img.remove();
+              return;
+            }
+            const src = imageSource(img);
+            if (src) img.setAttribute("src", src);
+          });
+
           const reader = new window.Readability(documentClone);
           const article = reader.parse();
 
@@ -199,12 +278,68 @@ async function extractContent() {
             return { error: "Readability could not extract content" };
           }
 
+          const container = document.createElement("div");
+          container.innerHTML = article.content;
+          const assets = [];
+          const seenAssets = new Set();
+
+          container.querySelectorAll("a[href]").forEach((a) => {
+            const href = toAbsoluteUrl(a.getAttribute("href"));
+            if (href) a.setAttribute("href", href);
+          });
+
+          container.querySelectorAll("img").forEach((img) => {
+            const w = parseInt(img.getAttribute("width") || "999");
+            const h = parseInt(img.getAttribute("height") || "999");
+            if (w < 10 || h < 10) {
+              img.remove();
+              return;
+            }
+            const src = imageSource(img);
+            if (!src) {
+              img.remove();
+              return;
+            }
+            img.setAttribute("src", src);
+            img.removeAttribute("srcset");
+            img.removeAttribute("data-srcset");
+            if (!seenAssets.has(src)) {
+              seenAssets.add(src);
+              assets.push({ url: src, alt: img.getAttribute("alt") || "" });
+            }
+          });
+
           const turndown = new window.TurndownService({
             headingStyle: "atx",
             codeBlockStyle: "fenced",
             bulletListMarker: "-",
           });
 
+          turndown.addRule("math", {
+            filter: (node) => node.hasAttribute?.("data-llm-math"),
+            replacement: (_content, node) => {
+              const tex = node.getAttribute("data-llm-math").trim();
+              if (node.getAttribute("data-llm-display") === "true") {
+                return `\n\n$$\n${tex}\n$$\n\n`;
+              }
+              return `$${tex}$`;
+            },
+          });
+          turndown.addRule("mathml", {
+            filter: "math",
+            replacement: (_content, node) => `\n\n${node.outerHTML}\n\n`,
+          });
+          turndown.addRule("figureCaption", {
+            filter: "figcaption",
+            replacement: (content) => {
+              const text = content.trim();
+              return text ? `\n\n_${text}_\n\n` : "";
+            },
+          });
+          turndown.addRule("figure", {
+            filter: "figure",
+            replacement: (content) => `\n\n${content.trim()}\n\n`,
+          });
           turndown.addRule("tableCell", {
             filter: ["th", "td"],
             replacement: (content) => ` ${content.trim()} |`,
@@ -236,11 +371,12 @@ async function extractContent() {
             replacement: () => "",
           });
 
-          const markdown = turndown.turndown(article.content);
+          const markdown = turndown.turndown(container.innerHTML);
 
           return {
             title: article.title,
             content: markdown,
+            assets,
             excerpt: article.excerpt || "",
             siteName: article.siteName || "",
             length: article.length || 0,
@@ -263,6 +399,7 @@ async function extractContent() {
       if (result.title && result.title.length > 5) titleInput.value = result.title;
 
       extractedContent = result.content;
+      extractedAssets = result.assets || [];
       contentPreview.textContent = result.excerpt
         ? "📝 " + result.excerpt + "\n\n---\n\n" + extractedContent
         : extractedContent;
@@ -294,6 +431,7 @@ async function fallbackExtract(tabId) {
   });
 
   if (results?.[0]?.result) {
+    extractedAssets = [];
     extractedContent = results[0].result;
     contentPreview.textContent = extractedContent;
   } else {
@@ -313,6 +451,65 @@ function arrayBufferToBase64(buffer) {
     binary += chunk;
   }
   return btoa(binary);
+}
+
+function extensionForMime(mimeType) {
+  const mime = (mimeType || "").split(";")[0].trim().toLowerCase();
+  const map = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/svg+xml": "svg",
+    "image/bmp": "bmp",
+    "image/tiff": "tiff",
+    "image/avif": "avif",
+  };
+  return map[mime] || "img";
+}
+
+function sanitizeAssetFileName(name) {
+  return (name || "image")
+    .replace(/[?#].*$/, "")
+    .replace(/[^A-Za-z0-9._-]/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "image";
+}
+
+function clipAssetFileName(asset, index, mimeType) {
+  let name = "";
+  try {
+    name = decodeURIComponent(new URL(asset.url).pathname.split("/").pop() || "");
+  } catch {
+    name = "";
+  }
+  name = sanitizeAssetFileName(name || asset.alt || `image-${index + 1}`);
+  if (!/\.[A-Za-z0-9]{2,5}$/.test(name)) {
+    name += `.${extensionForMime(mimeType)}`;
+  }
+  return `${String(index + 1).padStart(3, "0")}-${name}`;
+}
+
+async function downloadClipAssets(assets) {
+  const downloaded = [];
+  for (let i = 0; i < assets.length; i++) {
+    const asset = assets[i];
+    setStatus("sending", `⏳ Downloading image ${i + 1}/${assets.length}...`);
+    const res = await fetch(asset.url, { method: "GET" });
+    if (!res.ok) throw new Error(`image HTTP ${res.status}: ${asset.url}`);
+    const mimeType = res.headers.get("Content-Type") || "application/octet-stream";
+    if (!mimeType.toLowerCase().startsWith("image/")) {
+      throw new Error(`image URL returned ${mimeType}: ${asset.url}`);
+    }
+    const buffer = await res.arrayBuffer();
+    downloaded.push({
+      originalUrl: asset.url,
+      fileName: clipAssetFileName(asset, i, mimeType),
+      mimeType,
+      dataBase64: arrayBufferToBase64(buffer),
+    });
+  }
+  return downloaded;
 }
 
 async function downloadPaperArtifact(arxivId) {
@@ -359,6 +556,8 @@ async function sendClip() {
   setStatus("sending", "⏳ Sending to LLM Wiki...");
 
   try {
+    const assets = await downloadClipAssets(extractedAssets);
+    if (assets.length > 0) setStatus("sending", "⏳ Sending page and images to LLM Wiki...");
     const res = await fetch(`${API_URL}/clip`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -367,6 +566,7 @@ async function sendClip() {
         url: pageUrl,
         content: extractedContent,
         projectPath: selectedProject,
+        assets,
       }),
     });
 
