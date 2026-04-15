@@ -403,9 +403,9 @@ fn handle_clip(body: &str) -> String {
             .unwrap_or_else(|_| file_path.replace('\\', "/"))
     };
 
-    // Add to pending clips for frontend to pick up and auto-ingest
+    // Add to pending clips so frontend refreshes raw sources. Ingest is queued manually.
     if let Ok(mut pending) = PENDING_CLIPS.lock() {
-        pending.push((project_path, file_path.clone(), true));
+        pending.push((project_path, file_path.clone(), false));
     }
 
     format!(r#"{{"ok":true,"path":"{}"}}"#, relative_path)
@@ -540,11 +540,10 @@ fn handle_paper(body: &str) -> String {
         }
     }
 
-    let auto_ingest = artifact_kind == "pdf";
     if let Ok(mut pending) = PENDING_CLIPS.lock() {
-        pending.push((project_path.clone(), file_path_str, auto_ingest));
+        pending.push((project_path.clone(), file_path_str, false));
         if let Some(path) = &parsed_source_path {
-            pending.push((project_path.clone(), path.to_string_lossy().to_string(), true));
+            pending.push((project_path.clone(), path.to_string_lossy().to_string(), false));
         }
     }
 
@@ -561,7 +560,7 @@ fn handle_paper(body: &str) -> String {
         "parsedPath": parsed_relative_path,
         "arxivId": arxiv_id,
         "artifactKind": artifact_kind,
-        "autoIngest": auto_ingest || parsed_source_path.is_some(),
+        "autoIngest": false,
     }).to_string()
 }
 

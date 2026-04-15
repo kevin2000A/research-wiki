@@ -1,5 +1,4 @@
 import { useWikiStore } from "@/stores/wiki-store"
-import { autoIngest } from "./ingest"
 import { listDirectory } from "@/commands/fs"
 
 const POLL_INTERVAL = 3000 // Check every 3 seconds
@@ -7,7 +6,7 @@ let intervalId: ReturnType<typeof setInterval> | null = null
 
 /**
  * Start polling the clip server for new web clips.
- * When a clip is detected, triggers auto-ingest and refreshes the file tree.
+ * When a clip is detected, refreshes raw sources. Ingest is manually queued from Sources.
  */
 export function startClipWatcher() {
   if (intervalId) return // Already running
@@ -24,23 +23,15 @@ export function startClipWatcher() {
 
       for (const clip of data.clips) {
         const clipProjectPath: string = clip.projectPath
-        const clipFilePath: string = clip.filePath
 
         // Refresh file tree if clip is for current project
         if (project && clipProjectPath === project.path) {
           try {
             const tree = await listDirectory(project.path)
             store.setFileTree(tree)
+            store.bumpDataVersion()
           } catch {
             // ignore
-          }
-
-          // Auto-ingest the clipped file
-          const llmConfig = store.llmConfig
-          if (clip.autoIngest !== false && (llmConfig.apiKey || llmConfig.provider === "ollama" || llmConfig.provider === "custom")) {
-            autoIngest(clipProjectPath, clipFilePath, llmConfig).catch((err) => {
-              console.error("Failed to auto-ingest web clip:", err)
-            })
           }
         }
       }

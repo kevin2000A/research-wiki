@@ -7,7 +7,6 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { useWikiStore } from "@/stores/wiki-store"
 import { copyFile, listDirectory, readFile, writeFile, deleteFile, findRelatedWikiPages, preprocessFile } from "@/commands/fs"
 import type { FileNode } from "@/types/wiki"
-import { startIngest } from "@/lib/ingest"
 import { enqueueIngest, enqueueBatch } from "@/lib/ingest-queue"
 import { useTranslation } from "react-i18next"
 import { normalizePath, getFileName } from "@/lib/path-utils"
@@ -17,14 +16,14 @@ export function SourcesView() {
   const project = useWikiStore((s) => s.project)
   const selectedFile = useWikiStore((s) => s.selectedFile)
   const setSelectedFile = useWikiStore((s) => s.setSelectedFile)
-  const setActiveView = useWikiStore((s) => s.setActiveView)
   const setFileContent = useWikiStore((s) => s.setFileContent)
   const setFileTree = useWikiStore((s) => s.setFileTree)
-  const setChatExpanded = useWikiStore((s) => s.setChatExpanded)
-  const llmConfig = useWikiStore((s) => s.llmConfig)
+  const dataVersion = useWikiStore((s) => s.dataVersion)
   const [sources, setSources] = useState<FileNode[]>([])
   const [importing, setImporting] = useState(false)
-  const [ingestingPath, setIngestingPath] = useState<string | null>(null)
+  const [queueingPath, setQueueingPath] = useState<string | null>(null)
+  const [batchQueueing, setBatchQueueing] = useState(false)
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set())
 
   const loadSources = useCallback(async () => {
     if (!project) return
@@ -34,14 +33,17 @@ export function SourcesView() {
       // Filter out hidden files/dirs and cache
       const filtered = filterTree(tree)
       setSources(filtered)
+      const files = new Set(flattenSourceFiles(filtered).map((f) => f.path))
+      setSelectedPaths((prev) => new Set([...prev].filter((path) => files.has(path))))
     } catch {
       setSources([])
+      setSelectedPaths(new Set())
     }
   }, [project])
 
   useEffect(() => {
     loadSources()
-  }, [loadSources])
+  }, [loadSources, dataVersion])
 
   async function handleImport() {
     if (!project) return
@@ -88,13 +90,11 @@ export function SourcesView() {
     const pp = normalizePath(project.path)
     const paths = Array.isArray(selected) ? selected : [selected]
 
-    const importedPaths: string[] = []
     for (const sourcePath of paths) {
       const originalName = getFileName(sourcePath) || "unknown"
       const destPath = await getUniqueDestPath(`${pp}/raw/sources`, originalName)
       try {
         await copyFile(sourcePath, destPath)
-        importedPaths.push(destPath)
         // Pre-process file (extract text from PDF, etc.) for instant preview later
         preprocessFile(destPath).catch(() => {})
       } catch (err) {
@@ -104,15 +104,6 @@ export function SourcesView() {
 
     setImporting(false)
     await loadSources()
-
-    // Enqueue for serial ingest (runs in background via ingest queue)
-    if (llmConfig.apiKey || llmConfig.provider === "ollama" || llmConfig.provider === "custom") {
-      for (const destPath of importedPaths) {
-        enqueueIngest(pp, destPath).catch((err) =>
-          console.error(`Failed to enqueue ingest:`, err)
-        )
-      }
-    }
   }
 
   async function handleImportFolder() {
@@ -146,32 +137,6 @@ export function SourcesView() {
 
       setImporting(false)
       await loadSources()
-
-      // Build ingest tasks with folder context
-      if (llmConfig.apiKey || llmConfig.provider === "ollama" || llmConfig.provider === "custom") {
-        const tasks = copiedFiles
-          .filter((fp) => {
-            const ext = fp.split(".").pop()?.toLowerCase() ?? ""
-            // Only ingest text-based files, skip images/media
-            return ["md", "mdx", "txt", "pdf", "docx", "pptx", "xlsx", "xls",
-                    "csv", "json", "html", "htm", "rtf", "xml", "yaml", "yml"].includes(ext)
-          })
-          .map((filePath) => {
-            // Build folder context from relative path
-            const relPath = filePath.replace(destDir + "/", "")
-            const parts = relPath.split("/")
-            parts.pop() // remove filename
-            const context = parts.length > 0
-              ? `${folderName} > ${parts.join(" > ")}`
-              : folderName
-            return { sourcePath: filePath, folderContext: context }
-          })
-
-        if (tasks.length > 0) {
-          await enqueueBatch(pp, tasks)
-          console.log(`[Folder Import] Enqueued ${tasks.length} files for ingest`)
-        }
-      }
     } catch (err) {
       console.error(`Failed to import folder:`, err)
       setImporting(false)
@@ -325,18 +290,64 @@ export function SourcesView() {
   }
 
   async function handleIngest(node: FileNode) {
-    if (!project || ingestingPath) return
-    setIngestingPath(node.path)
+    if (!project || queueingPath) return
+    setQueueingPath(node.path)
     try {
-      setChatExpanded(true)
-      setActiveView("wiki")
-      await startIngest(normalizePath(project.path), node.path, llmConfig)
+      const pp = normalizePath(project.path)
+      await enqueueIngest(pp, node.path, getFolderContext(pp, node.path))
+      setSelectedPaths((prev) => {
+        const next = new Set(prev)
+        next.delete(node.path)
+        return next
+      })
     } catch (err) {
-      console.error("Failed to start ingest:", err)
+      console.error("Failed to enqueue ingest:", err)
     } finally {
-      setIngestingPath(null)
+      setQueueingPath(null)
     }
   }
+
+  function handleToggleSelected(path: string, selected: boolean) {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev)
+      if (selected) next.add(path)
+      else next.delete(path)
+      return next
+    })
+  }
+
+  function handleSelectAllIngestable() {
+    const paths = flattenSourceFiles(sources)
+      .filter(isIngestableSource)
+      .map((node) => node.path)
+    setSelectedPaths(new Set(paths))
+  }
+
+  async function handleBatchIngest() {
+    if (!project || batchQueueing) return
+    const pp = normalizePath(project.path)
+    const selected = flattenSourceFiles(sources)
+      .filter((node) => selectedPaths.has(node.path) && isIngestableSource(node))
+    if (selected.length === 0) return
+
+    setBatchQueueing(true)
+    try {
+      await enqueueBatch(pp, selected.map((node) => ({
+        sourcePath: node.path,
+        folderContext: getFolderContext(pp, node.path),
+      })))
+      setSelectedPaths(new Set())
+    } catch (err) {
+      console.error("Failed to enqueue batch ingest:", err)
+    } finally {
+      setBatchQueueing(false)
+    }
+  }
+
+  const selectedIngestableCount = flattenSourceFiles(sources)
+    .filter((node) => selectedPaths.has(node.path) && isIngestableSource(node))
+    .length
+  const ingestableCount = flattenSourceFiles(sources).filter(isIngestableSource).length
 
   return (
     <div className="flex h-full flex-col">
@@ -345,6 +356,13 @@ export function SourcesView() {
         <div className="flex gap-1">
           <Button variant="ghost" size="icon" onClick={loadSources} title="Refresh">
             <RefreshCw className="h-4 w-4" />
+          </Button>
+          <Button variant="outline" size="sm" onClick={handleSelectAllIngestable} disabled={ingestableCount === 0}>
+            {t("sources.selectAllIngestable")}
+          </Button>
+          <Button size="sm" onClick={handleBatchIngest} disabled={batchQueueing || selectedIngestableCount === 0}>
+            <BookOpen className="mr-1 h-4 w-4" />
+            {batchQueueing ? t("sources.queueing") : t("sources.ingestSelected", { count: selectedIngestableCount })}
           </Button>
           <Button size="sm" onClick={handleImport} disabled={importing}>
             <Plus className="mr-1 h-4 w-4" />
@@ -380,7 +398,9 @@ export function SourcesView() {
               onOpen={handleOpenSource}
               onIngest={handleIngest}
               onDelete={handleDelete}
-              ingestingPath={ingestingPath}
+              onToggleSelected={handleToggleSelected}
+              selectedPaths={selectedPaths}
+              queueingPath={queueingPath}
               depth={0}
             />
           </div>
@@ -389,6 +409,9 @@ export function SourcesView() {
 
       <div className="border-t px-4 py-2 text-xs text-muted-foreground">
         {t("sources.sourceCount", { count: countFiles(sources) })}
+        {selectedIngestableCount > 0 && (
+          <span className="ml-2">· {t("sources.selectedCount", { count: selectedIngestableCount })}</span>
+        )}
       </div>
     </div>
   )
@@ -466,14 +489,18 @@ function SourceTree({
   onOpen,
   onIngest,
   onDelete,
-  ingestingPath,
+  onToggleSelected,
+  selectedPaths,
+  queueingPath,
   depth,
 }: {
   nodes: FileNode[]
   onOpen: (node: FileNode) => void
   onIngest: (node: FileNode) => void
   onDelete: (node: FileNode) => void
-  ingestingPath: string | null
+  onToggleSelected: (path: string, selected: boolean) => void
+  selectedPaths: Set<string>
+  queueingPath: string | null
   depth: number
 }) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
@@ -518,7 +545,9 @@ function SourceTree({
                   onOpen={onOpen}
                   onIngest={onIngest}
                   onDelete={onDelete}
-                  ingestingPath={ingestingPath}
+                  onToggleSelected={onToggleSelected}
+                  selectedPaths={selectedPaths}
+                  queueingPath={queueingPath}
                   depth={depth + 1}
                 />
               )}
@@ -526,12 +555,22 @@ function SourceTree({
           )
         }
 
+        const ingestable = isIngestableSource(node)
+
         return (
           <div
             key={node.path}
             className="flex w-full items-center gap-1 rounded-md px-1 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
             style={{ paddingLeft: `${depth * 16 + 4}px` }}
           >
+            <input
+              type="checkbox"
+              className="ml-1 h-3.5 w-3.5 shrink-0 accent-primary"
+              checked={selectedPaths.has(node.path)}
+              disabled={!ingestable}
+              title={ingestable ? "Select for batch ingest" : "Not ingestable"}
+              onChange={(e) => onToggleSelected(node.path, e.currentTarget.checked)}
+            />
             <button
               onClick={() => onOpen(node)}
               className="flex flex-1 items-center gap-2 truncate px-2 py-1 text-left"
@@ -543,8 +582,8 @@ function SourceTree({
               variant="ghost"
               size="icon"
               className="h-7 w-7 shrink-0"
-              title="Ingest"
-              disabled={ingestingPath === node.path}
+              title={ingestable ? "Add to ingest queue" : "Not ingestable"}
+              disabled={!ingestable || queueingPath === node.path}
               onClick={() => onIngest(node)}
             >
               <BookOpen className="h-4 w-4" />
@@ -563,6 +602,35 @@ function SourceTree({
       })}
     </>
   )
+}
+
+function flattenSourceFiles(nodes: FileNode[]): FileNode[] {
+  const files: FileNode[] = []
+  for (const node of nodes) {
+    if (node.is_dir && node.children) {
+      files.push(...flattenSourceFiles(node.children))
+    } else if (!node.is_dir) {
+      files.push(node)
+    }
+  }
+  return files
+}
+
+function isIngestableSource(node: FileNode): boolean {
+  const lower = node.name.toLowerCase()
+  const ext = lower.includes(".") ? lower.slice(lower.lastIndexOf(".") + 1) : ""
+  return [
+    "md", "mdx", "txt", "pdf", "docx", "pptx", "xlsx", "xls",
+    "csv", "json", "html", "htm", "rtf", "xml", "yaml", "yml", "tex",
+  ].includes(ext)
+}
+
+function getFolderContext(projectPath: string, filePath: string): string {
+  const root = `${normalizePath(projectPath)}/raw/sources/`
+  const relPath = normalizePath(filePath).replace(root, "")
+  const parts = relPath.split("/")
+  parts.pop()
+  return parts.join(" > ")
 }
 
 function flattenMdFiles(nodes: FileNode[]): FileNode[] {
