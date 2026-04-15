@@ -37,7 +37,7 @@ export function startClipWatcher() {
 
           // Auto-ingest the clipped file
           const llmConfig = store.llmConfig
-          if (llmConfig.apiKey || llmConfig.provider === "ollama") {
+          if (clip.autoIngest !== false && (llmConfig.apiKey || llmConfig.provider === "ollama")) {
             autoIngest(clipProjectPath, clipFilePath, llmConfig).catch((err) => {
               console.error("Failed to auto-ingest web clip:", err)
             })

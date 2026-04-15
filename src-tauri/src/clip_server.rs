@@ -1,11 +1,12 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread;
+use base64::{engine::general_purpose, Engine as _};
 use tiny_http::{Header, Method, Response, Server};
 
 static CURRENT_PROJECT: Mutex<String> = Mutex::new(String::new());
 static ALL_PROJECTS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new()); // (name, path)
-static PENDING_CLIPS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new()); // (projectPath, filePath)
+static PENDING_CLIPS: Mutex<Vec<(String, String, bool)>> = Mutex::new(Vec::new()); // (projectPath, filePath, autoIngest)
 
 /// Daemon status: 0=starting, 1=running, 2=port_conflict, 3=error
 static DAEMON_STATUS: AtomicU8 = AtomicU8::new(0);
@@ -171,8 +172,11 @@ pub fn start_clip_server() {
                 (&Method::Get, "/clips/pending") => {
                     let mut pending = PENDING_CLIPS.lock().unwrap();
                     let items: Vec<String> = pending.iter()
-                        .map(|(proj, file)| format!(r#"{{"projectPath":"{}","filePath":"{}"}}"#,
-                            proj.replace('"', r#"\""#), file.replace('"', r#"\""#)))
+                        .map(|(proj, file, auto_ingest)| serde_json::json!({
+                            "projectPath": proj,
+                            "filePath": file,
+                            "autoIngest": auto_ingest,
+                        }).to_string())
                         .collect();
                     let body = format!(r#"{{"ok":true,"clips":[{}]}}"#, items.join(","));
                     pending.clear();
@@ -194,6 +198,31 @@ pub fn start_clip_server() {
                     }
 
                     let result = handle_clip(&body);
+                    let status = if result.contains(r#""ok":true"#) {
+                        200
+                    } else {
+                        500
+                    };
+                    let mut response = Response::from_string(result).with_status_code(status);
+                    for h in &cors_headers {
+                        response.add_header(h.clone());
+                    }
+                    let _ = request.respond(response);
+                }
+                (&Method::Post, "/paper") => {
+                    let mut body = String::new();
+                    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+                        let err =
+                            format!(r#"{{"ok":false,"error":"Failed to read body: {}"}}"#, e);
+                        let mut response = Response::from_string(err).with_status_code(400);
+                        for h in &cors_headers {
+                            response.add_header(h.clone());
+                        }
+                        let _ = request.respond(response);
+                        continue;
+                    }
+
+                    let result = handle_paper(&body);
                     let status = if result.contains(r#""ok":true"#) {
                         200
                     } else {
@@ -357,8 +386,108 @@ fn handle_clip(body: &str) -> String {
 
     // Add to pending clips for frontend to pick up and auto-ingest
     if let Ok(mut pending) = PENDING_CLIPS.lock() {
-        pending.push((project_path, file_path.clone()));
+        pending.push((project_path, file_path.clone(), true));
     }
 
     format!(r#"{{"ok":true,"path":"{}"}}"#, relative_path)
+}
+
+fn handle_paper(body: &str) -> String {
+    let parsed: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return format!(r#"{{"ok":false,"error":"Invalid JSON: {}"}}"#, e),
+    };
+
+    let project_path = match parsed["projectPath"].as_str() {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => return r#"{"ok":false,"error":"projectPath is required"}"#.to_string(),
+    };
+    let arxiv_id = match parsed["arxivId"].as_str() {
+        Some(id) if !id.is_empty() => id,
+        _ => return r#"{"ok":false,"error":"arxivId is required"}"#.to_string(),
+    };
+    let artifact_kind = match parsed["artifactKind"].as_str() {
+        Some(k) if !k.is_empty() => k,
+        _ => return r#"{"ok":false,"error":"artifactKind is required"}"#.to_string(),
+    };
+    let file_name = match parsed["fileName"].as_str() {
+        Some(n) if !n.is_empty() => sanitize_file_name(n),
+        _ => return r#"{"ok":false,"error":"fileName is required"}"#.to_string(),
+    };
+    let data_base64 = match parsed["dataBase64"].as_str() {
+        Some(d) if !d.is_empty() => d,
+        _ => return r#"{"ok":false,"error":"dataBase64 is required"}"#.to_string(),
+    };
+
+    let bytes = match general_purpose::STANDARD.decode(data_base64) {
+        Ok(b) => b,
+        Err(e) => return format!(r#"{{"ok":false,"error":"Invalid base64 data: {}"}}"#, e),
+    };
+
+    let dir_path = std::path::Path::new(&project_path).join("raw").join("sources");
+    if let Err(e) = std::fs::create_dir_all(&dir_path) {
+        return format!(
+            r#"{{"ok":false,"error":"Failed to create directory: {}"}}"#,
+            e
+        );
+    }
+
+    let file_path = unique_file_path(&dir_path, &file_name);
+    if let Err(e) = std::fs::write(&file_path, bytes) {
+        return format!(
+            r#"{{"ok":false,"error":"Failed to write paper file: {}"}}"#,
+            e
+        );
+    }
+
+    let file_path_str = file_path.to_string_lossy().to_string();
+    let relative_path = {
+        let base = std::path::Path::new(&project_path);
+        file_path
+            .strip_prefix(base)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| file_path_str.replace('\\', "/"))
+    };
+
+    let auto_ingest = artifact_kind == "pdf";
+    if let Ok(mut pending) = PENDING_CLIPS.lock() {
+        pending.push((project_path, file_path_str, auto_ingest));
+    }
+
+    serde_json::json!({
+        "ok": true,
+        "path": relative_path,
+        "arxivId": arxiv_id,
+        "artifactKind": artifact_kind,
+        "autoIngest": auto_ingest,
+    }).to_string()
+}
+
+fn sanitize_file_name(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn unique_file_path(dir_path: &std::path::Path, file_name: &str) -> std::path::PathBuf {
+    let mut file_path = dir_path.join(file_name);
+    let mut counter = 2u32;
+    while file_path.exists() {
+        let path = std::path::Path::new(file_name);
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = path.extension().map(|e| e.to_string_lossy().to_string());
+        let next = match ext {
+            Some(ext) => format!("{}-{}.{}", stem, counter, ext),
+            None => format!("{}-{}", stem, counter),
+        };
+        file_path = dir_path.join(next);
+        counter += 1;
+    }
+    file_path
 }
