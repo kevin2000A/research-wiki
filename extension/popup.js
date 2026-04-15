@@ -43,6 +43,7 @@ function safeArxivFileStem(arxivId) {
 function paperUrls(arxivId) {
   return {
     abs: `https://arxiv.org/abs/${arxivId}`,
+    overview: `https://www.alphaxiv.org/overview/${arxivId}.md`,
     source: `https://arxiv.org/e-print/${arxivId}`,
     pdf: `https://arxiv.org/pdf/${arxivId}`,
   };
@@ -79,6 +80,7 @@ function updatePaperPreview() {
   const urls = paperUrls(arxivId);
   paperPreview.textContent = [
     `ID: ${arxivId}`,
+    `alphaXiv overview: ${urls.overview}`,
     `Source: ${urls.source}`,
     `PDF fallback: ${urls.pdf}`,
   ].join("\n");
@@ -658,6 +660,17 @@ async function downloadClipAssets(assets) {
 async function downloadPaperArtifact(arxivId) {
   const urls = paperUrls(arxivId);
   const stem = safeArxivFileStem(arxivId);
+  let overviewMarkdown = "";
+  let overviewError = "";
+
+  try {
+    setStatus("sending", "⏳ Downloading alphaXiv overview...");
+    const overviewRes = await fetch(urls.overview, { method: "GET" });
+    if (!overviewRes.ok) throw new Error(`overview HTTP ${overviewRes.status}`);
+    overviewMarkdown = await overviewRes.text();
+  } catch (err) {
+    overviewError = err.message;
+  }
 
   try {
     setStatus("sending", "⏳ Downloading arXiv source package...");
@@ -671,6 +684,9 @@ async function downloadPaperArtifact(arxivId) {
       fileName: `${stem}-source.tar.gz`,
       mimeType: sourceType,
       sourceUrl: urls.source,
+      overviewUrl: urls.overview,
+      overviewMarkdown,
+      overviewError,
       buffer: sourceBuffer,
     };
   } catch (sourceErr) {
@@ -683,6 +699,9 @@ async function downloadPaperArtifact(arxivId) {
       fileName: `${stem}.pdf`,
       mimeType: pdfRes.headers.get("Content-Type") || "application/pdf",
       sourceUrl: urls.pdf,
+      overviewUrl: urls.overview,
+      overviewMarkdown,
+      overviewError,
       buffer: pdfBuffer,
     };
   }
@@ -757,6 +776,9 @@ async function sendPaper() {
         fileName: artifact.fileName,
         mimeType: artifact.mimeType,
         sourceUrl: artifact.sourceUrl,
+        overviewUrl: artifact.overviewUrl,
+        overviewMarkdown: artifact.overviewMarkdown,
+        overviewError: artifact.overviewError,
         dataBase64: arrayBufferToBase64(artifact.buffer),
       }),
     });
