@@ -526,8 +526,8 @@ export async function startIngest(
 
   const [sourceContent, schema, purpose, index] = await Promise.all([
     tryReadFile(sp),
-    tryReadFile(`${pp}/wiki/schema.md`),
-    tryReadFile(`${pp}/wiki/purpose.md`),
+    tryReadFile(`${pp}/schema.md`),
+    tryReadFile(`${pp}/purpose.md`),
     tryReadFile(`${pp}/wiki/index.md`),
   ])
 
@@ -594,7 +594,7 @@ export async function executeIngestWrites(
   const store = getStore()
 
   const [schema, index] = await Promise.all([
-    tryReadFile(`${pp}/wiki/schema.md`),
+    tryReadFile(`${pp}/schema.md`),
     tryReadFile(`${pp}/wiki/index.md`),
   ])
 
