@@ -315,6 +315,16 @@ async function extractContent() {
             bulletListMarker: "-",
           });
 
+          turndown.addRule("absoluteLink", {
+            filter: (node) => node.nodeName === "A" && node.getAttribute("href"),
+            replacement: (content, node) => {
+              const href = node.getAttribute("href");
+              const text = content.trim() || href;
+              const title = node.getAttribute("title");
+              const titlePart = title ? ` "${title.replace(/"/g, '\\"')}"` : "";
+              return `[${text.replace(/\]/g, "\\]")}](${href.replace(/\)/g, "%29")}${titlePart})`;
+            },
+          });
           turndown.addRule("math", {
             filter: (node) => node.hasAttribute?.("data-llm-math"),
             replacement: (_content, node) => {
@@ -414,25 +424,158 @@ async function extractContent() {
 }
 
 async function fallbackExtract(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["Turndown.js"],
+  });
+
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     func: () => {
       const clone = document.body.cloneNode(true);
-      ["script", "style", "nav", "header", "footer", ".sidebar", ".ad", ".comments"]
+      const pageBaseUrl = document.baseURI || location.href;
+
+      function toAbsoluteUrl(raw) {
+        const value = (raw || "").trim();
+        if (!value || value.startsWith("data:") || value.startsWith("blob:")) return "";
+        return new URL(value, pageBaseUrl).href;
+      }
+
+      function bestSrcFromSet(srcset) {
+        const candidates = (srcset || "")
+          .split(",")
+          .map((part) => {
+            const pieces = part.trim().split(/\s+/);
+            const url = pieces[0] || "";
+            const descriptor = pieces[1] || "0w";
+            const score = parseFloat(descriptor) || 0;
+            return { url, score };
+          })
+          .filter((item) => item.url);
+        candidates.sort((a, b) => b.score - a.score);
+        return candidates[0]?.url || "";
+      }
+
+      function imageSource(img) {
+        const directAttrs = ["src", "data-src", "data-original", "data-lazy-src", "data-url"];
+        for (const attr of directAttrs) {
+          const absolute = toAbsoluteUrl(img.getAttribute(attr));
+          if (absolute) return absolute;
+        }
+        const srcset = img.getAttribute("srcset") || img.getAttribute("data-srcset") || "";
+        return toAbsoluteUrl(bestSrcFromSet(srcset));
+      }
+
+      function mathNode(tex, display) {
+        const node = document.createElement(display ? "div" : "span");
+        node.setAttribute("data-llm-math", tex.trim());
+        node.setAttribute("data-llm-display", display ? "true" : "false");
+        node.textContent = display ? `$$\n${tex.trim()}\n$$` : `$${tex.trim()}$`;
+        return node;
+      }
+
+      ["script:not([type^=\"math/tex\"])", "style", "nav", "header", "footer", ".sidebar", ".ad", ".comments"]
         .forEach((sel) => clone.querySelectorAll(sel).forEach((el) => el.remove()));
 
-      return clone.innerText
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0)
-        .join("\n\n")
-        .slice(0, 50000);
+      clone.querySelectorAll('script[type^="math/tex"]').forEach((node) => {
+        const tex = node.textContent || "";
+        const display = (node.getAttribute("type") || "").includes("mode=display");
+        if (tex.trim()) node.replaceWith(mathNode(tex, display));
+      });
+
+      clone.querySelectorAll(".katex").forEach((node) => {
+        if (node.closest("[data-llm-math]")) return;
+        const annotation = node.querySelector('annotation[encoding="application/x-tex"]');
+        const tex = annotation?.textContent || "";
+        if (!tex.trim()) return;
+        node.replaceWith(mathNode(tex, Boolean(node.closest(".katex-display"))));
+      });
+
+      clone.querySelectorAll("math").forEach((node) => {
+        const annotation = node.querySelector('annotation[encoding="application/x-tex"]');
+        const tex = annotation?.textContent || "";
+        if (tex.trim()) node.replaceWith(mathNode(tex, node.getAttribute("display") === "block"));
+      });
+
+      clone.querySelectorAll("a[href]").forEach((a) => {
+        const href = toAbsoluteUrl(a.getAttribute("href"));
+        if (href) a.setAttribute("href", href);
+      });
+
+      const assets = [];
+      const seenAssets = new Set();
+      clone.querySelectorAll("img").forEach((img) => {
+        const w = parseInt(img.getAttribute("width") || "999");
+        const h = parseInt(img.getAttribute("height") || "999");
+        if (w < 10 || h < 10) {
+          img.remove();
+          return;
+        }
+        const src = imageSource(img);
+        if (!src) {
+          img.remove();
+          return;
+        }
+        img.setAttribute("src", src);
+        img.removeAttribute("srcset");
+        img.removeAttribute("data-srcset");
+        if (!seenAssets.has(src)) {
+          seenAssets.add(src);
+          assets.push({ url: src, alt: img.getAttribute("alt") || "" });
+        }
+      });
+
+      const turndown = new window.TurndownService({
+        headingStyle: "atx",
+        codeBlockStyle: "fenced",
+        bulletListMarker: "-",
+      });
+      turndown.addRule("absoluteLink", {
+        filter: (node) => node.nodeName === "A" && node.getAttribute("href"),
+        replacement: (content, node) => {
+          const href = node.getAttribute("href");
+          const text = content.trim() || href;
+          const title = node.getAttribute("title");
+          const titlePart = title ? ` "${title.replace(/"/g, '\\"')}"` : "";
+          return `[${text.replace(/\]/g, "\\]")}](${href.replace(/\)/g, "%29")}${titlePart})`;
+        },
+      });
+      turndown.addRule("math", {
+        filter: (node) => node.hasAttribute?.("data-llm-math"),
+        replacement: (_content, node) => {
+          const tex = node.getAttribute("data-llm-math").trim();
+          if (node.getAttribute("data-llm-display") === "true") {
+            return `\n\n$$\n${tex}\n$$\n\n`;
+          }
+          return `$${tex}$`;
+        },
+      });
+      turndown.addRule("mathml", {
+        filter: "math",
+        replacement: (_content, node) => `\n\n${node.outerHTML}\n\n`,
+      });
+      turndown.addRule("figureCaption", {
+        filter: "figcaption",
+        replacement: (content) => {
+          const text = content.trim();
+          return text ? `\n\n_${text}_\n\n` : "";
+        },
+      });
+      turndown.addRule("figure", {
+        filter: "figure",
+        replacement: (content) => `\n\n${content.trim()}\n\n`,
+      });
+
+      return {
+        content: turndown.turndown(clone.innerHTML).slice(0, 50000),
+        assets,
+      };
     },
   });
 
   if (results?.[0]?.result) {
-    extractedAssets = [];
-    extractedContent = results[0].result;
+    extractedAssets = results[0].result.assets || [];
+    extractedContent = results[0].result.content;
     contentPreview.textContent = extractedContent;
   } else {
     contentPreview.textContent = "Failed to extract content";
