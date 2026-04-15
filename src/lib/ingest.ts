@@ -27,6 +27,7 @@ export async function autoIngest(
   const sp = normalizePath(sourcePath)
   const activity = useActivityStore.getState()
   const fileName = getFileName(sp)
+  const currentDate = new Date().toISOString().slice(0, 10)
   const activityId = activity.addItem({
     type: "ingest",
     title: fileName,
@@ -94,7 +95,7 @@ export async function autoIngest(
   await streamChat(
     llmConfig,
     [
-      { role: "system", content: buildGenerationPrompt(schema, purpose, index, fileName, overview) },
+      { role: "system", content: buildGenerationPrompt(schema, purpose, index, fileName, overview, currentDate) },
       {
         role: "user",
         content: [
@@ -126,7 +127,7 @@ export async function autoIngest(
 
   // ── Step 3: Write files ───────────────────────────────────────
   activity.updateItem(activityId, { detail: "Writing files..." })
-  const writtenPaths = await writeFileBlocks(pp, generation)
+  const writtenPaths = await writeFileBlocks(pp, generation, currentDate)
 
   // Ensure source summary page exists (LLM may not have generated it correctly)
   const sourceBaseName = fileName.replace(/\.[^.]+$/, "")
@@ -216,7 +217,7 @@ export async function autoIngest(
   return writtenPaths
 }
 
-async function writeFileBlocks(projectPath: string, text: string): Promise<string[]> {
+async function writeFileBlocks(projectPath: string, text: string, currentDate: string): Promise<string[]> {
   const writtenPaths: string[] = []
   const matches = text.matchAll(FILE_BLOCK_REGEX)
 
@@ -229,7 +230,8 @@ async function writeFileBlocks(projectPath: string, text: string): Promise<strin
     try {
       if (relativePath === "wiki/log.md" || relativePath.endsWith("/log.md")) {
         const existing = await tryReadFile(fullPath)
-        const appended = existing ? `${existing}\n\n${content.trim()}` : content.trim()
+        const logEntry = normalizeLogEntryDate(content, currentDate)
+        const appended = existing ? `${existing}\n\n${logEntry}` : logEntry
         await writeFile(fullPath, appended)
       } else {
         await writeFile(fullPath, content)
@@ -241,6 +243,17 @@ async function writeFileBlocks(projectPath: string, text: string): Promise<strin
   }
 
   return writtenPaths
+}
+
+function normalizeLogEntryDate(content: string, currentDate: string): string {
+  let normalized = content.trim()
+  normalized = normalized.replace(
+    /^##\s*\[?\d{4}-\d{2}-\d{2}\]?(.*)$/m,
+    (match, rest) => match.includes("[") ? `## [${currentDate}]${rest}` : `## ${currentDate}${rest}`,
+  )
+  normalized = normalized.replace(/(^-\s*)\d{4}-\d{2}-\d{2}(:)/gm, `$1${currentDate}$2`)
+  if (!/^##\s/m.test(normalized)) normalized = `## ${currentDate}\n${normalized}`
+  return normalized
 }
 
 const REVIEW_BLOCK_REGEX = /---REVIEW:\s*(\w[\w-]*)\s*\|\s*(.+?)\s*---\n([\s\S]*?)---END REVIEW---/g
@@ -362,7 +375,7 @@ function buildAnalysisPrompt(purpose: string, index: string): string {
 /**
  * Step 2 prompt: AI takes its own analysis and generates wiki files + review items.
  */
-function buildGenerationPrompt(schema: string, purpose: string, index: string, sourceFileName: string, overview?: string): string {
+function buildGenerationPrompt(schema: string, purpose: string, index: string, sourceFileName: string, overview: string | undefined, currentDate: string): string {
   // Use original filename (without extension) as the source summary page name
   const sourceBaseName = sourceFileName.replace(/\.[^.]+$/, "")
 
@@ -374,6 +387,7 @@ function buildGenerationPrompt(schema: string, purpose: string, index: string, s
     `## IMPORTANT: Source File`,
     `The original source file is: **${sourceFileName}**`,
     `All wiki pages generated from this source MUST include this filename in their frontmatter \`sources\` field.`,
+    `Current date for all created/updated fields and wiki/log.md entries: **${currentDate}**.`,
     "",
     "## Output Format",
     "",
@@ -388,7 +402,7 @@ function buildGenerationPrompt(schema: string, purpose: string, index: string, s
     "2. Entity pages in wiki/entities/ for key entities identified in the analysis",
     "3. Concept pages in wiki/concepts/ for key concepts identified in the analysis",
     "4. An updated wiki/index.md — add new entries to existing categories, preserve all existing entries",
-    "5. A log entry for wiki/log.md (just the new entry to append, format: ## [YYYY-MM-DD] ingest | Title)",
+    `5. A log entry for wiki/log.md using exactly **${currentDate}** (just the new entry to append, format: ## ${currentDate}\\n- ingest | Title)`,
     "6. An updated wiki/overview.md — a high-level summary of what the entire wiki covers, updated to reflect the newly ingested source. This should be a comprehensive 2-5 paragraph overview of ALL topics in the wiki, not just the new source.",
     "",
     "## Frontmatter Rules (CRITICAL)",
@@ -398,8 +412,8 @@ function buildGenerationPrompt(schema: string, purpose: string, index: string, s
     "---",
     "type: source | entity | concept | comparison | query | synthesis",
     "title: Human-readable title",
-    "created: YYYY-MM-DD",
-    "updated: YYYY-MM-DD",
+    `created: ${currentDate}`,
+    `updated: ${currentDate}`,
     "tags: []",
     "related: []",
     `sources: [\"${sourceFileName}\"]  # MUST contain the original source filename`,
