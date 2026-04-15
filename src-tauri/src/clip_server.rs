@@ -294,7 +294,7 @@ fn handle_clip(body: &str) -> String {
 
     let title = parsed["title"].as_str().unwrap_or("Untitled");
     let url = parsed["url"].as_str().unwrap_or("");
-    let content = parsed["content"].as_str().unwrap_or("");
+    let mut content = parsed["content"].as_str().unwrap_or("").to_string();
 
     // Use projectPath from request body, or fall back to globally-set project path
     let project_path_from_body = parsed["projectPath"].as_str().unwrap_or("").to_string();
@@ -356,6 +356,23 @@ fn handle_clip(body: &str) -> String {
         counter += 1;
     }
     let file_path = file_path.to_string_lossy().to_string();
+    let source_stem = std::path::Path::new(&file_path)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    if let Some(assets) = parsed["assets"].as_array() {
+        match save_clip_assets(&project_path, &source_stem, &content, assets) {
+            Ok(updated) => content = updated,
+            Err(e) => {
+                return format!(
+                    r#"{{"ok":false,"error":"Failed to save clip assets: {}"}}"#,
+                    e
+                );
+            }
+        }
+    }
 
     // Build markdown content with web-clip origin
     let markdown = format!(
@@ -390,6 +407,60 @@ fn handle_clip(body: &str) -> String {
     }
 
     format!(r#"{{"ok":true,"path":"{}"}}"#, relative_path)
+}
+
+fn save_clip_assets(
+    project_path: &str,
+    source_stem: &str,
+    content: &str,
+    assets: &[serde_json::Value],
+) -> Result<String, String> {
+    if assets.is_empty() {
+        return Ok(content.to_string());
+    }
+
+    let asset_dir_name = sanitize_file_name(source_stem);
+    let asset_dir = std::path::Path::new(project_path)
+        .join("raw")
+        .join("assets")
+        .join("web-clips")
+        .join(&asset_dir_name);
+    std::fs::create_dir_all(&asset_dir)
+        .map_err(|e| format!("Failed to create clip asset directory: {}", e))?;
+
+    let mut updated = content.to_string();
+    for asset in assets {
+        let original_url = asset["originalUrl"]
+            .as_str()
+            .ok_or_else(|| "asset originalUrl is required".to_string())?;
+        let file_name = asset["fileName"]
+            .as_str()
+            .map(sanitize_file_name)
+            .ok_or_else(|| "asset fileName is required".to_string())?;
+        let data_base64 = asset["dataBase64"]
+            .as_str()
+            .ok_or_else(|| "asset dataBase64 is required".to_string())?;
+        let bytes = general_purpose::STANDARD
+            .decode(data_base64)
+            .map_err(|e| format!("Invalid asset base64 data: {}", e))?;
+
+        let saved_path = unique_file_path(&asset_dir, &file_name);
+        std::fs::write(&saved_path, bytes)
+            .map_err(|e| format!("Failed to write clip asset: {}", e))?;
+
+        let saved_name = saved_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let relative = format!(
+            "../assets/web-clips/{}/{}",
+            asset_dir_name,
+            saved_name
+        );
+        updated = updated.replace(original_url, &relative);
+    }
+
+    Ok(updated)
 }
 
 fn handle_paper(body: &str) -> String {
