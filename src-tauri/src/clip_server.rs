@@ -480,6 +480,19 @@ fn handle_paper(body: &str) -> String {
         _ => return r#"{"ok":false,"error":"arxivId is required"}"#.to_string(),
     };
     let source_url = parsed["sourceUrl"].as_str().unwrap_or("");
+    let metadata_url = parsed["metadataUrl"].as_str().unwrap_or("");
+    let paper_title = parsed["paperTitle"]
+        .as_str()
+        .map(|title| title.trim())
+        .filter(|title| !title.is_empty())
+        .map(|title| title.to_string())
+        .unwrap_or_else(|| format!("arXiv {}", arxiv_id));
+    let paper_source_url = parsed["paperSourceUrl"]
+        .as_str()
+        .map(|url| url.trim())
+        .filter(|url| !url.is_empty())
+        .map(|url| url.to_string())
+        .unwrap_or_else(|| format!("https://arxiv.org/abs/{}", arxiv_id));
     let overview_url = parsed["overviewUrl"].as_str().unwrap_or("");
     let overview_markdown = parsed["overviewMarkdown"].as_str().unwrap_or("").trim();
     let overview_error = parsed["overviewError"].as_str().unwrap_or("");
@@ -511,7 +524,7 @@ fn handle_paper(body: &str) -> String {
     }
 
     let file_path = unique_file_path(&dir_path, &file_name);
-    if let Err(e) = std::fs::write(&file_path, bytes) {
+    if let Err(e) = std::fs::write(&file_path, &bytes) {
         return format!(
             r#"{{"ok":false,"error":"Failed to write paper file: {}"}}"#,
             e
@@ -529,7 +542,17 @@ fn handle_paper(body: &str) -> String {
 
     let mut extracted_assets_path: Option<String> = None;
     let mut parse_error: Option<String> = None;
-    let paper_content = if artifact_kind == "source" {
+    let paper_content = if artifact_kind == "arxiv2md" {
+        match String::from_utf8(bytes) {
+            Ok(markdown) => markdown,
+            Err(e) => {
+                return format!(
+                    r#"{{"ok":false,"error":"arxiv2md markdown is not UTF-8: {}"}}"#,
+                    e
+                )
+            }
+        }
+    } else if artifact_kind == "source" {
         match parse_arxiv_source_package(&project_path, arxiv_id, &file_path) {
             Ok(parsed) => {
                 extracted_assets_path = Some(parsed.assets_relative_path);
@@ -580,26 +603,48 @@ fn handle_paper(body: &str) -> String {
         .map(|error| format!("- Source conversion error: `{}`", error.replace('`', "'")))
         .unwrap_or_else(|| "- Source conversion error: none".to_string());
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let combined_markdown = format!(
-        "---\ntype: arxiv-paper\ntitle: \"arXiv {}\"\narxiv_id: \"{}\"\nurl: \"https://arxiv.org/abs/{}\"\noverview_url: \"{}\"\nartifact_url: \"{}\"\nartifact_path: \"{}\"\nartifact_kind: \"{}\"\nartifact_mime: \"{}\"\nclipped: {}\norigin: arxiv-paper\nsources: []\ntags: [arxiv, paper]\n---\n\n# arXiv {}\n\n## alphaXiv Overview\n\n{}\n\n## Paper Content\n\n{}\n\n## Original Artifact\n\n- Artifact kind: `{}`\n- Artifact path: `{}`\n- Artifact URL: `{}`\n{}\n{}\n",
-        yaml_escape(arxiv_id),
-        yaml_escape(arxiv_id),
-        yaml_escape(arxiv_id),
-        yaml_escape(overview_url),
-        yaml_escape(source_url),
-        yaml_escape(&relative_path),
-        yaml_escape(artifact_kind),
-        yaml_escape(mime_type),
-        date,
-        arxiv_id,
-        overview_section,
-        paper_content,
-        artifact_kind,
-        relative_path,
-        source_url,
-        extracted_assets_line,
-        parse_error_line,
-    );
+    let combined_markdown = if artifact_kind == "arxiv2md" {
+        format!(
+            "---\ntype: arxiv-paper\ntitle: \"{}\"\narxiv_id: \"{}\"\nurl: \"{}\"\narxiv2md_url: \"{}\"\narxiv2md_metadata_url: \"{}\"\nartifact_path: \"{}\"\nartifact_kind: \"{}\"\nartifact_mime: \"{}\"\nclipped: {}\norigin: arxiv2md\nsources: []\ntags: [arxiv, paper]\n---\n\n# {}\n\n## Paper Content\n\n{}\n\n## Original Artifact\n\n- Artifact kind: `{}`\n- Raw markdown path: `{}`\n- arxiv2md Markdown API: `{}`\n- arxiv2md Metadata API: `{}`\n- Paper URL: `{}`\n",
+            yaml_escape(&paper_title),
+            yaml_escape(arxiv_id),
+            yaml_escape(&paper_source_url),
+            yaml_escape(source_url),
+            yaml_escape(metadata_url),
+            yaml_escape(&relative_path),
+            yaml_escape(artifact_kind),
+            yaml_escape(mime_type),
+            date,
+            paper_title,
+            paper_content,
+            artifact_kind,
+            relative_path,
+            source_url,
+            metadata_url,
+            paper_source_url,
+        )
+    } else {
+        format!(
+            "---\ntype: arxiv-paper\ntitle: \"arXiv {}\"\narxiv_id: \"{}\"\nurl: \"https://arxiv.org/abs/{}\"\noverview_url: \"{}\"\nartifact_url: \"{}\"\nartifact_path: \"{}\"\nartifact_kind: \"{}\"\nartifact_mime: \"{}\"\nclipped: {}\norigin: arxiv-paper\nsources: []\ntags: [arxiv, paper]\n---\n\n# arXiv {}\n\n## alphaXiv Overview\n\n{}\n\n## Paper Content\n\n{}\n\n## Original Artifact\n\n- Artifact kind: `{}`\n- Artifact path: `{}`\n- Artifact URL: `{}`\n{}\n{}\n",
+            yaml_escape(arxiv_id),
+            yaml_escape(arxiv_id),
+            yaml_escape(arxiv_id),
+            yaml_escape(overview_url),
+            yaml_escape(source_url),
+            yaml_escape(&relative_path),
+            yaml_escape(artifact_kind),
+            yaml_escape(mime_type),
+            date,
+            arxiv_id,
+            overview_section,
+            paper_content,
+            artifact_kind,
+            relative_path,
+            source_url,
+            extracted_assets_line,
+            parse_error_line,
+        )
+    };
     if let Err(e) = std::fs::write(&paper_path, combined_markdown) {
         return format!(
             r#"{{"ok":false,"error":"Failed to write combined paper markdown: {}"}}"#,

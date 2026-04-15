@@ -41,11 +41,12 @@ function safeArxivFileStem(arxivId) {
 }
 
 function paperUrls(arxivId) {
+  const encoded = encodeURIComponent(arxivId);
+  const commonParams = `url=${encoded}&remove_refs=true&remove_toc=true&remove_citations=true`;
   return {
     abs: `https://arxiv.org/abs/${arxivId}`,
-    overview: `https://www.alphaxiv.org/overview/${arxivId}.md`,
-    source: `https://arxiv.org/e-print/${arxivId}`,
-    pdf: `https://arxiv.org/pdf/${arxivId}`,
+    arxiv2mdMarkdown: `https://arxiv2md.org/api/markdown?${commonParams}`,
+    arxiv2mdJson: `https://arxiv2md.org/api/json?${commonParams}`,
   };
 }
 
@@ -80,10 +81,10 @@ function updatePaperPreview() {
   const urls = paperUrls(arxivId);
   paperPreview.textContent = [
     `ID: ${arxivId}`,
-    `alphaXiv overview: ${urls.overview}`,
-    `Source: ${urls.source}`,
-    `PDF fallback: ${urls.pdf}`,
-    `Raw bundle: ${safeArxivFileStem(arxivId)}-paper.md`,
+    `Markdown API: ${urls.arxiv2mdMarkdown}`,
+    `Metadata API: ${urls.arxiv2mdJson}`,
+    `Raw markdown: ${safeArxivFileStem(arxivId)}-arxiv2md.md`,
+    `Paper bundle: ${safeArxivFileStem(arxivId)}-paper.md`,
   ].join("\n");
   updateActionState();
 }
@@ -599,6 +600,19 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
+function textToBase64(text) {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    let chunk = "";
+    const end = Math.min(i + chunkSize, bytes.length);
+    for (let j = i; j < end; j++) chunk += String.fromCharCode(bytes[j]);
+    binary += chunk;
+  }
+  return btoa(binary);
+}
+
 function extensionForMime(mimeType) {
   const mime = (mimeType || "").split(";")[0].trim().toLowerCase();
   const map = {
@@ -658,54 +672,39 @@ async function downloadClipAssets(assets) {
   return downloaded;
 }
 
-async function downloadPaperArtifact(arxivId) {
+async function downloadPaperMarkdownBundle(arxivId) {
   const urls = paperUrls(arxivId);
   const stem = safeArxivFileStem(arxivId);
-  let overviewMarkdown = "";
-  let overviewError = "";
 
+  setStatus("sending", "⏳ Downloading arxiv2md markdown...");
+  const markdownRes = await fetch(urls.arxiv2mdMarkdown, { method: "GET" });
+  if (!markdownRes.ok) throw new Error(`arxiv2md markdown HTTP ${markdownRes.status}`);
+  const markdown = await markdownRes.text();
+  if (!markdown.trim()) throw new Error("arxiv2md markdown was empty");
+
+  let paperTitle = `arXiv ${arxivId}`;
+  let paperSourceUrl = urls.abs;
   try {
-    setStatus("sending", "⏳ Downloading alphaXiv overview...");
-    const overviewRes = await fetch(urls.overview, { method: "GET" });
-    if (!overviewRes.ok) throw new Error(`overview HTTP ${overviewRes.status}`);
-    overviewMarkdown = await overviewRes.text();
+    setStatus("sending", "⏳ Downloading arxiv2md metadata...");
+    const metadataRes = await fetch(urls.arxiv2mdJson, { method: "GET" });
+    if (!metadataRes.ok) throw new Error(`arxiv2md metadata HTTP ${metadataRes.status}`);
+    const metadata = await metadataRes.json();
+    if (metadata.title) paperTitle = metadata.title;
+    if (metadata.source_url) paperSourceUrl = metadata.source_url;
   } catch (err) {
-    overviewError = err.message;
+    setStatus("sending", `⏳ Metadata unavailable (${err.message}); saving markdown...`);
   }
 
-  try {
-    setStatus("sending", "⏳ Downloading arXiv source package...");
-    const sourceRes = await fetch(urls.source, { method: "GET" });
-    if (!sourceRes.ok) throw new Error(`source HTTP ${sourceRes.status}`);
-    const sourceType = sourceRes.headers.get("Content-Type") || "application/gzip";
-    if (sourceType.toLowerCase().includes("text/html")) throw new Error("source returned HTML");
-    const sourceBuffer = await sourceRes.arrayBuffer();
-    return {
-      artifactKind: "source",
-      fileName: `${stem}-source.tar.gz`,
-      mimeType: sourceType,
-      sourceUrl: urls.source,
-      overviewUrl: urls.overview,
-      overviewMarkdown,
-      overviewError,
-      buffer: sourceBuffer,
-    };
-  } catch (sourceErr) {
-    setStatus("sending", `⏳ Source unavailable (${sourceErr.message}); downloading PDF...`);
-    const pdfRes = await fetch(urls.pdf, { method: "GET" });
-    if (!pdfRes.ok) throw new Error(`PDF HTTP ${pdfRes.status}`);
-    const pdfBuffer = await pdfRes.arrayBuffer();
-    return {
-      artifactKind: "pdf",
-      fileName: `${stem}.pdf`,
-      mimeType: pdfRes.headers.get("Content-Type") || "application/pdf",
-      sourceUrl: urls.pdf,
-      overviewUrl: urls.overview,
-      overviewMarkdown,
-      overviewError,
-      buffer: pdfBuffer,
-    };
-  }
+  return {
+    artifactKind: "arxiv2md",
+    fileName: `${stem}-arxiv2md.md`,
+    mimeType: "text/markdown",
+    sourceUrl: urls.arxiv2mdMarkdown,
+    metadataUrl: urls.arxiv2mdJson,
+    paperTitle,
+    paperSourceUrl,
+    markdown,
+  };
 }
 
 async function sendClip() {
@@ -765,8 +764,8 @@ async function sendPaper() {
   clipBtn.disabled = true;
 
   try {
-    const artifact = await downloadPaperArtifact(arxivId);
-    setStatus("sending", `⏳ Sending ${artifact.artifactKind} to LLM Wiki...`);
+    const artifact = await downloadPaperMarkdownBundle(arxivId);
+    setStatus("sending", "⏳ Sending arxiv2md markdown to LLM Wiki...");
     const res = await fetch(`${API_URL}/paper`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -777,10 +776,10 @@ async function sendPaper() {
         fileName: artifact.fileName,
         mimeType: artifact.mimeType,
         sourceUrl: artifact.sourceUrl,
-        overviewUrl: artifact.overviewUrl,
-        overviewMarkdown: artifact.overviewMarkdown,
-        overviewError: artifact.overviewError,
-        dataBase64: arrayBufferToBase64(artifact.buffer),
+        metadataUrl: artifact.metadataUrl,
+        paperTitle: artifact.paperTitle,
+        paperSourceUrl: artifact.paperSourceUrl,
+        dataBase64: textToBase64(artifact.markdown),
       }),
     });
 
