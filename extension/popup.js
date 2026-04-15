@@ -171,7 +171,6 @@ async function loadCurrentTab() {
     setMode("paper");
   } else {
     setMode("web");
-    await extractContent();
   }
 }
 
