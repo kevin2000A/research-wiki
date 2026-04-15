@@ -480,6 +480,9 @@ fn handle_paper(body: &str) -> String {
         _ => return r#"{"ok":false,"error":"arxivId is required"}"#.to_string(),
     };
     let source_url = parsed["sourceUrl"].as_str().unwrap_or("");
+    let overview_url = parsed["overviewUrl"].as_str().unwrap_or("");
+    let overview_markdown = parsed["overviewMarkdown"].as_str().unwrap_or("").trim();
+    let overview_error = parsed["overviewError"].as_str().unwrap_or("");
     let mime_type = parsed["mimeType"].as_str().unwrap_or("");
     let artifact_kind = match parsed["artifactKind"].as_str() {
         Some(k) if !k.is_empty() => k,
@@ -524,53 +527,111 @@ fn handle_paper(body: &str) -> String {
             .unwrap_or_else(|_| file_path_str.replace('\\', "/"))
     };
 
-    let mut parsed_source_path: Option<std::path::PathBuf> = None;
-    if artifact_kind == "source" {
-        match parse_arxiv_source_package(&project_path, arxiv_id, source_url, mime_type, &file_path) {
-            Ok(path) => parsed_source_path = Some(path),
+    let mut extracted_assets_path: Option<String> = None;
+    let mut parse_error: Option<String> = None;
+    let paper_content = if artifact_kind == "source" {
+        match parse_arxiv_source_package(&project_path, arxiv_id, &file_path) {
+            Ok(parsed) => {
+                extracted_assets_path = Some(parsed.assets_relative_path);
+                parsed.markdown
+            }
             Err(e) => {
-                return serde_json::json!({
-                    "ok": false,
-                    "error": format!("Saved source package, but LaTeXML parsing failed: {}", e),
-                    "path": relative_path,
-                    "arxivId": arxiv_id,
-                    "artifactKind": artifact_kind,
-                }).to_string();
+                parse_error = Some(e.clone());
+                format!(
+                    "Source package was saved at `{}` but LaTeXML conversion failed.\n\nConversion error:\n\n```text\n{}\n```",
+                    relative_path,
+                    e
+                )
             }
         }
+    } else {
+        format!(
+            "PDF artifact was saved at `{}`. PDF-aware paper parsing is pending, so use the alphaXiv overview plus this original PDF path for now.",
+            relative_path
+        )
+    };
+
+    let stem = sanitize_file_name(&arxiv_id.replace('/', "-"));
+    let paper_path = unique_file_path(&dir_path, &format!("{}-paper.md", stem));
+    let paper_path_str = paper_path.to_string_lossy().to_string();
+    let paper_relative_path = {
+        let base = std::path::Path::new(&project_path);
+        paper_path
+            .strip_prefix(base)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| paper_path_str.replace('\\', "/"))
+    };
+
+    let overview_section = if overview_markdown.is_empty() {
+        if overview_error.is_empty() {
+            "alphaXiv overview was not provided.".to_string()
+        } else {
+            format!("alphaXiv overview unavailable.\n\n```text\n{}\n```", overview_error)
+        }
+    } else {
+        overview_markdown.to_string()
+    };
+    let extracted_assets_line = extracted_assets_path
+        .as_ref()
+        .map(|path| format!("- Extracted source files and figures: `{}`", path))
+        .unwrap_or_else(|| "- Extracted source files and figures: not available".to_string());
+    let parse_error_line = parse_error
+        .as_ref()
+        .map(|error| format!("- Source conversion error: `{}`", error.replace('`', "'")))
+        .unwrap_or_else(|| "- Source conversion error: none".to_string());
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let combined_markdown = format!(
+        "---\ntype: arxiv-paper\ntitle: \"arXiv {}\"\narxiv_id: \"{}\"\nurl: \"https://arxiv.org/abs/{}\"\noverview_url: \"{}\"\nartifact_url: \"{}\"\nartifact_path: \"{}\"\nartifact_kind: \"{}\"\nartifact_mime: \"{}\"\nclipped: {}\norigin: arxiv-paper\nsources: []\ntags: [arxiv, paper]\n---\n\n# arXiv {}\n\n## alphaXiv Overview\n\n{}\n\n## Paper Content\n\n{}\n\n## Original Artifact\n\n- Artifact kind: `{}`\n- Artifact path: `{}`\n- Artifact URL: `{}`\n{}\n{}\n",
+        yaml_escape(arxiv_id),
+        yaml_escape(arxiv_id),
+        yaml_escape(arxiv_id),
+        yaml_escape(overview_url),
+        yaml_escape(source_url),
+        yaml_escape(&relative_path),
+        yaml_escape(artifact_kind),
+        yaml_escape(mime_type),
+        date,
+        arxiv_id,
+        overview_section,
+        paper_content,
+        artifact_kind,
+        relative_path,
+        source_url,
+        extracted_assets_line,
+        parse_error_line,
+    );
+    if let Err(e) = std::fs::write(&paper_path, combined_markdown) {
+        return format!(
+            r#"{{"ok":false,"error":"Failed to write combined paper markdown: {}"}}"#,
+            e
+        );
     }
 
     if let Ok(mut pending) = PENDING_CLIPS.lock() {
         pending.push((project_path.clone(), file_path_str, false));
-        if let Some(path) = &parsed_source_path {
-            pending.push((project_path.clone(), path.to_string_lossy().to_string(), false));
-        }
+        pending.push((project_path.clone(), paper_path_str, false));
     }
-
-    let parsed_relative_path = parsed_source_path.as_ref().map(|path| {
-        let base = std::path::Path::new(&project_path);
-        path.strip_prefix(base)
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"))
-    });
 
     serde_json::json!({
         "ok": true,
         "path": relative_path,
-        "parsedPath": parsed_relative_path,
+        "paperPath": paper_relative_path,
         "arxivId": arxiv_id,
         "artifactKind": artifact_kind,
         "autoIngest": false,
     }).to_string()
 }
 
+struct ArxivSourceParse {
+    markdown: String,
+    assets_relative_path: String,
+}
+
 fn parse_arxiv_source_package(
     project_path: &str,
     arxiv_id: &str,
-    source_url: &str,
-    mime_type: &str,
     source_package_path: &std::path::Path,
-) -> Result<std::path::PathBuf, String> {
+) -> Result<ArxivSourceParse, String> {
     let stem = sanitize_file_name(&arxiv_id.replace('/', "-"));
     let assets_dir = std::path::Path::new(project_path)
         .join("raw")
@@ -623,31 +684,10 @@ fn parse_arxiv_source_package(
     let image_prefix = format!("../assets/arxiv/{}/", asset_dir_name);
     let converted = rewrite_markdown_image_paths(&cleanup_latexml_markdown(&converted), &image_prefix);
 
-    let source_dir = std::path::Path::new(project_path).join("raw").join("sources");
-    std::fs::create_dir_all(&source_dir)
-        .map_err(|e| format!("Failed to create source directory: {}", e))?;
-    let output_path = unique_file_path(&source_dir, &format!("{}-arxiv-source.md", stem));
-
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let markdown = format!(
-        "---\ntype: arxiv-source\ntitle: \"arXiv {} source\"\narxiv_id: \"{}\"\nurl: \"{}\"\nclipped: {}\norigin: arxiv-source\nartifact_mime: \"{}\"\nsources: []\ntags: [arxiv, paper]\n---\n\n# arXiv {} source\n\nSource package: `{}`\nExtracted source files and figures: `{}`\n\n{}\n",
-        arxiv_id.replace('"', r#"\""#),
-        arxiv_id.replace('"', r#"\""#),
-        source_url.replace('"', r#"\""#),
-        date,
-        mime_type.replace('"', r#"\""#),
-        arxiv_id,
-        source_package_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy(),
-        format!("raw/assets/arxiv/{}", asset_dir_name),
-        converted,
-    );
-    std::fs::write(&output_path, markdown)
-        .map_err(|e| format!("Failed to write converted arXiv Markdown: {}", e))?;
-
-    Ok(output_path)
+    Ok(ArxivSourceParse {
+        markdown: converted,
+        assets_relative_path: format!("raw/assets/arxiv/{}", asset_dir_name),
+    })
 }
 
 fn extract_arxiv_source(source_package_path: &std::path::Path, extract_dir: &std::path::Path) -> Result<(), String> {
@@ -828,6 +868,10 @@ fn sanitize_file_name(raw: &str) -> String {
             }
         })
         .collect()
+}
+
+fn yaml_escape(raw: &str) -> String {
+    raw.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn unique_file_path(dir_path: &std::path::Path, file_name: &str) -> std::path::PathBuf {
