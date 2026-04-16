@@ -3,14 +3,18 @@
   "name": "LLM Wiki Clipper",
   "version": "0.1.0",
   "description": "Clip web pages to your LLM Wiki knowledge base",
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "storage", "alarms"],
   "host_permissions": [
     "<all_urls>",
     "http://127.0.0.1:19827/*",
-    "https://arxiv2md.org/*",
     "https://arxiv.org/*",
-    "https://export.arxiv.org/*"
+    "https://export.arxiv.org/*",
+    "https://alphaxiv.org/*",
+    "https://www.alphaxiv.org/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

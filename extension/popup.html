@@ -92,12 +92,116 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .preview-box {
+      padding: 8px;
+      background: #f3f4f6;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      font-size: 11px;
+      color: #4b5563;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
     .hint {
       margin-top: 4px;
       font-size: 11px;
       color: #6b7280;
       line-height: 1.4;
     }
+    .queue-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 10px 0 8px;
+    }
+    .queue-toolbar-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .mini-btn {
+      padding: 5px 8px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      background: white;
+      color: #374151;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .mini-btn:disabled {
+      color: #9ca3af;
+      cursor: not-allowed;
+      background: #f9fafb;
+    }
+    .queue-summary {
+      font-size: 11px;
+      color: #6b7280;
+    }
+    .queue-list {
+      max-height: 170px;
+      overflow-y: auto;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      background: white;
+    }
+    .queue-empty {
+      padding: 12px;
+      font-size: 11px;
+      color: #9ca3af;
+      text-align: center;
+    }
+    .queue-item {
+      padding: 10px 10px 8px;
+      border-bottom: 1px solid #f3f4f6;
+    }
+    .queue-item:last-child { border-bottom: none; }
+    .queue-item-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .queue-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: #111827;
+      word-break: break-word;
+    }
+    .queue-meta, .queue-detail, .queue-error {
+      font-size: 11px;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+    .queue-meta, .queue-detail { color: #6b7280; }
+    .queue-error {
+      color: #b91c1c;
+      margin-top: 4px;
+    }
+    .queue-item-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .queue-badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+    .queue-badge.queued { background: #eef2ff; color: #3730a3; }
+    .queue-badge.fetching,
+    .queue-badge.saving { background: #eff6ff; color: #1d4ed8; }
+    .queue-badge.done { background: #ecfdf5; color: #047857; }
+    .queue-badge.failed { background: #fef2f2; color: #b91c1c; }
     #contentPreview {
       padding: 10px;
       background: #f3f4f6;
@@ -180,12 +284,24 @@
       <div class="field">
         <label>arXiv / alphaXiv URL or ID</label>
         <input type="text" id="paperInput" placeholder="https://arxiv.org/abs/2401.12345 or 2401.12345">
-        <div class="hint">Uses arxiv2md Markdown directly. JSON is fetched only for metadata. No source/PDF fallback.</div>
+        <div class="hint">Background queue downloads arXiv source first, falls back to PDF, and only saves to raw/sources. Ingest later inside LLM Wiki.</div>
       </div>
 
       <div class="field">
         <label>Paper Preview</label>
-        <div id="paperPreview" class="url-preview">Enter an arXiv URL, alphaXiv URL, or paper ID.</div>
+        <div id="paperPreview" class="preview-box">Enter an arXiv URL, alphaXiv URL, or paper ID.</div>
+      </div>
+
+      <div class="queue-toolbar">
+        <div id="paperQueueSummary" class="queue-summary">No queued papers yet.</div>
+        <div class="queue-toolbar-actions">
+          <button class="mini-btn" id="refreshQueueBtn" type="button">Refresh</button>
+          <button class="mini-btn" id="clearDoneBtn" type="button">Clear Done</button>
+        </div>
+      </div>
+
+      <div id="paperQueueList" class="queue-list">
+        <div class="queue-empty">No papers queued yet.</div>
       </div>
     </div>
 

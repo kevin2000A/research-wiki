@@ -12,6 +12,10 @@ const webFields = document.getElementById("webFields");
 const paperFields = document.getElementById("paperFields");
 const paperInput = document.getElementById("paperInput");
 const paperPreview = document.getElementById("paperPreview");
+const refreshQueueBtn = document.getElementById("refreshQueueBtn");
+const clearDoneBtn = document.getElementById("clearDoneBtn");
+const paperQueueSummary = document.getElementById("paperQueueSummary");
+const paperQueueList = document.getElementById("paperQueueList");
 
 let extractedContent = "";
 let extractedAssets = [];
@@ -20,6 +24,7 @@ let activeTabId = null;
 let appConnected = false;
 let currentMode = "web";
 let webExtractionStarted = false;
+let queueTasks = [];
 
 function setStatus(kind, text) {
   statusBar.className = `status ${kind}`;
@@ -41,20 +46,145 @@ function safeArxivFileStem(arxivId) {
 }
 
 function paperUrls(arxivId) {
-  const encoded = encodeURIComponent(arxivId);
-  const commonParams = `url=${encoded}&remove_refs=true&remove_toc=true&remove_citations=true`;
+  const encoded = arxivId
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
   return {
     abs: `https://arxiv.org/abs/${arxivId}`,
-    arxiv2mdMarkdown: `https://arxiv2md.org/api/markdown?${commonParams}`,
-    arxiv2mdJson: `https://arxiv2md.org/api/json?${commonParams}`,
+    source: `https://arxiv.org/e-print/${encoded}`,
+    pdf: `https://arxiv.org/pdf/${encoded}.pdf`,
   };
+}
+
+function queueStatusOrder(status) {
+  return {
+    fetching: 0,
+    saving: 1,
+    queued: 2,
+    failed: 3,
+    done: 4,
+  }[status] ?? 5;
+}
+
+function sortQueueTasks(tasks) {
+  return [...tasks].sort((a, b) => {
+    const statusDiff = queueStatusOrder(a.status) - queueStatusOrder(b.status);
+    if (statusDiff !== 0) return statusDiff;
+    return (b.updatedAt || 0) - (a.updatedAt || 0);
+  });
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function queueStatusLabel(status) {
+  return {
+    queued: "Queued",
+    fetching: "Fetching",
+    saving: "Saving",
+    failed: "Failed",
+    done: "Done",
+  }[status] || status || "Unknown";
+}
+
+function updateQueueSummary() {
+  const counts = {
+    queued: queueTasks.filter((task) => task.status === "queued").length,
+    fetching: queueTasks.filter((task) => task.status === "fetching" || task.status === "saving").length,
+    failed: queueTasks.filter((task) => task.status === "failed").length,
+    done: queueTasks.filter((task) => task.status === "done").length,
+  };
+  if (queueTasks.length === 0) {
+    paperQueueSummary.textContent = "No queued papers yet.";
+  } else {
+    paperQueueSummary.textContent = [
+      `${counts.queued} queued`,
+      `${counts.fetching} active`,
+      `${counts.failed} failed`,
+      `${counts.done} done`,
+    ].join(" · ");
+  }
+  clearDoneBtn.disabled = counts.done === 0;
+}
+
+function renderPaperQueue() {
+  updateQueueSummary();
+
+  if (queueTasks.length === 0) {
+    paperQueueList.innerHTML = '<div class="queue-empty">No papers queued yet.</div>';
+    return;
+  }
+
+  paperQueueList.innerHTML = queueTasks.map((task) => {
+    const detail = task.paperPath
+      ? task.paperPath
+      : task.fileName
+        ? `Artifact: ${task.fileName}`
+        : task.statusText || "";
+    const actions = [];
+    if (task.status === "failed") {
+      actions.push(`<button class="mini-btn" type="button" data-queue-action="retry" data-task-id="${escapeHtml(task.id)}">Retry</button>`);
+    }
+    if (task.status !== "fetching" && task.status !== "saving") {
+      actions.push(`<button class="mini-btn" type="button" data-queue-action="remove" data-task-id="${escapeHtml(task.id)}">Remove</button>`);
+    }
+
+    return `
+      <div class="queue-item">
+        <div class="queue-item-head">
+          <div class="queue-title">${escapeHtml(task.arxivId)}</div>
+          <span class="queue-badge ${escapeHtml(task.status)}">${escapeHtml(queueStatusLabel(task.status))}</span>
+        </div>
+        <div class="queue-meta">${escapeHtml(task.projectName || task.projectPath)}</div>
+        <div class="queue-detail">${escapeHtml(task.statusText || detail || "Queued")}</div>
+        ${detail && detail !== task.statusText ? `<div class="queue-detail">${escapeHtml(detail)}</div>` : ""}
+        ${task.error ? `<div class="queue-error">${escapeHtml(task.error)}</div>` : ""}
+        ${actions.length > 0 ? `<div class="queue-item-actions">${actions.join("")}</div>` : ""}
+      </div>
+    `;
+  }).join("");
+}
+
+function sendBackgroundMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      if (!response?.ok) {
+        reject(new Error(response?.error || "Extension request failed"));
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+async function loadPaperQueue() {
+  try {
+    const response = await sendBackgroundMessage({ type: "paperQueue/get" });
+    queueTasks = sortQueueTasks(response.tasks || []);
+  } catch (err) {
+    queueTasks = [];
+    if (currentMode === "paper") {
+      setStatus("error", `✗ Failed to load background queue: ${err.message}`);
+    }
+  }
+  renderPaperQueue();
 }
 
 function updateActionState() {
   if (!appConnected) {
     clipBtn.disabled = true;
     clipBtn.textContent = currentMode === "paper"
-      ? "📄 App not running — cannot save"
+      ? "➕ App not running — cannot queue"
       : "📎 App not running — cannot save";
     return;
   }
@@ -62,7 +192,7 @@ function updateActionState() {
   if (currentMode === "paper") {
     const arxivId = parseArxivInput(paperInput.value || pageUrl);
     clipBtn.disabled = !arxivId || !projectSelect.value;
-    clipBtn.textContent = "📄 Save Paper Bundle";
+    clipBtn.textContent = "➕ Add to Background Queue";
     return;
   }
 
@@ -81,9 +211,10 @@ function updatePaperPreview() {
   const urls = paperUrls(arxivId);
   paperPreview.textContent = [
     `ID: ${arxivId}`,
-    `Markdown API: ${urls.arxiv2mdMarkdown}`,
-    `Metadata API: ${urls.arxiv2mdJson}`,
-    `Raw markdown: ${safeArxivFileStem(arxivId)}-arxiv2md.md`,
+    `Source package: ${urls.source}`,
+    `PDF fallback: ${urls.pdf}`,
+    `Raw source: ${safeArxivFileStem(arxivId)}-source.tar.gz`,
+    `Raw PDF fallback: ${safeArxivFileStem(arxivId)}.pdf`,
     `Paper bundle: ${safeArxivFileStem(arxivId)}-paper.md`,
   ].join("\n");
   updateActionState();
@@ -100,6 +231,7 @@ function setMode(mode) {
     const currentId = parseArxivInput(pageUrl);
     if (!paperInput.value && currentId) paperInput.value = currentId;
     updatePaperPreview();
+    loadPaperQueue();
   } else {
     updateActionState();
     if (activeTabId && !webExtractionStarted) extractContent();
@@ -600,19 +732,6 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
-function textToBase64(text) {
-  const bytes = new TextEncoder().encode(text);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    let chunk = "";
-    const end = Math.min(i + chunkSize, bytes.length);
-    for (let j = i; j < end; j++) chunk += String.fromCharCode(bytes[j]);
-    binary += chunk;
-  }
-  return btoa(binary);
-}
-
 function extensionForMime(mimeType) {
   const mime = (mimeType || "").split(";")[0].trim().toLowerCase();
   const map = {
@@ -672,41 +791,6 @@ async function downloadClipAssets(assets) {
   return downloaded;
 }
 
-async function downloadPaperMarkdownBundle(arxivId) {
-  const urls = paperUrls(arxivId);
-  const stem = safeArxivFileStem(arxivId);
-
-  setStatus("sending", "⏳ Downloading arxiv2md markdown...");
-  const markdownRes = await fetch(urls.arxiv2mdMarkdown, { method: "GET" });
-  if (!markdownRes.ok) throw new Error(`arxiv2md markdown HTTP ${markdownRes.status}`);
-  const markdown = await markdownRes.text();
-  if (!markdown.trim()) throw new Error("arxiv2md markdown was empty");
-
-  let paperTitle = `arXiv ${arxivId}`;
-  let paperSourceUrl = urls.abs;
-  try {
-    setStatus("sending", "⏳ Downloading arxiv2md metadata...");
-    const metadataRes = await fetch(urls.arxiv2mdJson, { method: "GET" });
-    if (!metadataRes.ok) throw new Error(`arxiv2md metadata HTTP ${metadataRes.status}`);
-    const metadata = await metadataRes.json();
-    if (metadata.title) paperTitle = metadata.title;
-    if (metadata.source_url) paperSourceUrl = metadata.source_url;
-  } catch (err) {
-    setStatus("sending", `⏳ Metadata unavailable (${err.message}); saving markdown...`);
-  }
-
-  return {
-    artifactKind: "arxiv2md",
-    fileName: `${stem}-arxiv2md.md`,
-    mimeType: "text/markdown",
-    sourceUrl: urls.arxiv2mdMarkdown,
-    metadataUrl: urls.arxiv2mdJson,
-    paperTitle,
-    paperSourceUrl,
-    markdown,
-  };
-}
-
 async function sendClip() {
   const selectedProject = projectSelect.value;
   if (!selectedProject) {
@@ -748,7 +832,7 @@ async function sendClip() {
   }
 }
 
-async function sendPaper() {
+async function queuePaper() {
   const selectedProject = projectSelect.value;
   if (!selectedProject) {
     setStatus("error", "✗ Please select a project");
@@ -764,37 +848,44 @@ async function sendPaper() {
   clipBtn.disabled = true;
 
   try {
-    const artifact = await downloadPaperMarkdownBundle(arxivId);
-    setStatus("sending", "⏳ Sending arxiv2md markdown to LLM Wiki...");
-    const res = await fetch(`${API_URL}/paper`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        projectPath: selectedProject,
-        arxivId,
-        artifactKind: artifact.artifactKind,
-        fileName: artifact.fileName,
-        mimeType: artifact.mimeType,
-        sourceUrl: artifact.sourceUrl,
-        metadataUrl: artifact.metadataUrl,
-        paperTitle: artifact.paperTitle,
-        paperSourceUrl: artifact.paperSourceUrl,
-        dataBase64: textToBase64(artifact.markdown),
-      }),
+    const projectName = projectSelect.options[projectSelect.selectedIndex]?.textContent || selectedProject;
+    const response = await sendBackgroundMessage({
+      type: "paperQueue/enqueue",
+      arxivId,
+      projectPath: selectedProject,
+      projectName,
     });
-
-    const data = await res.json();
-    if (data.ok) {
-      const projectName = projectSelect.options[projectSelect.selectedIndex]?.textContent || "project";
-      setStatus("success", `✓ Saved paper bundle ${data.paperPath || artifact.fileName} to ${projectName}`);
-      clipBtn.textContent = "✓ Saved!";
-    } else {
-      setStatus("error", `✗ Error: ${data.error}`);
-      updateActionState();
-    }
+    queueTasks = sortQueueTasks(response.tasks || queueTasks);
+    renderPaperQueue();
+    setStatus(
+      "success",
+      response.duplicate
+        ? `↺ ${arxivId} is already in the background queue`
+        : `✓ Added ${arxivId} to the background queue`,
+    );
+    await sendBackgroundMessage({ type: "paperQueue/process" });
   } catch (err) {
-    setStatus("error", `✗ Paper clipping failed: ${err.message}`);
+    setStatus("error", `✗ Failed to queue paper: ${err.message}`);
+  } finally {
     updateActionState();
+  }
+}
+
+async function handlePaperQueueAction(action, taskId) {
+  try {
+    if (action === "retry") {
+      await sendBackgroundMessage({ type: "paperQueue/retry", taskId });
+      setStatus("success", "✓ Re-queued failed paper");
+    } else if (action === "remove") {
+      await sendBackgroundMessage({ type: "paperQueue/remove", taskId });
+      setStatus("success", "✓ Removed paper from queue");
+    } else {
+      return;
+    }
+    await loadPaperQueue();
+    await sendBackgroundMessage({ type: "paperQueue/process" });
+  } catch (err) {
+    setStatus("error", `✗ Queue action failed: ${err.message}`);
   }
 }
 
@@ -812,7 +903,7 @@ function resizePreview() {
 
 clipBtn.addEventListener("click", () => {
   if (currentMode === "paper") {
-    sendPaper();
+    queuePaper();
   } else {
     sendClip();
   }
@@ -820,11 +911,38 @@ clipBtn.addEventListener("click", () => {
 webModeBtn.addEventListener("click", () => setMode("web"));
 paperModeBtn.addEventListener("click", () => setMode("paper"));
 paperInput.addEventListener("input", updatePaperPreview);
+paperInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && currentMode === "paper") {
+    event.preventDefault();
+    queuePaper();
+  }
+});
 projectSelect.addEventListener("change", updateActionState);
+refreshQueueBtn.addEventListener("click", () => loadPaperQueue());
+clearDoneBtn.addEventListener("click", async () => {
+  try {
+    await sendBackgroundMessage({ type: "paperQueue/clearDone" });
+    await loadPaperQueue();
+    setStatus("success", "✓ Cleared completed downloads");
+  } catch (err) {
+    setStatus("error", `✗ Failed to clear completed downloads: ${err.message}`);
+  }
+});
+paperQueueList.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-queue-action]");
+  if (!button) return;
+  handlePaperQueueAction(button.dataset.queueAction, button.dataset.taskId);
+});
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== "paperQueueUpdated") return;
+  queueTasks = sortQueueTasks(message.tasks || []);
+  renderPaperQueue();
+});
 
 (async () => {
   await checkConnection();
   await loadCurrentTab();
+  await loadPaperQueue();
   updateActionState();
   setTimeout(resizePreview, 100);
 })();
