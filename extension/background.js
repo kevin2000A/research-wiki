@@ -68,15 +68,8 @@ function storageSet(value) {
 }
 
 function createAlarm(name, when) {
-  return new Promise((resolve, reject) => {
-    chrome.alarms.create(name, { when }, () => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve();
-    });
-  });
+  chrome.alarms.create(name, { when });
+  return Promise.resolve();
 }
 
 function sendRuntimeMessage(message) {
@@ -405,6 +398,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === "paperQueue/get") {
       const state = await getQueueState();
       sendResponse({ ok: true, tasks: state.tasks });
+      return;
+    }
+
+    if (message.type === "paperQueueUpdated") {
+      sendResponse({ ok: true });
       return;
     }
 
