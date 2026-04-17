@@ -12,6 +12,7 @@ const webFields = document.getElementById("webFields");
 const paperFields = document.getElementById("paperFields");
 const paperInput = document.getElementById("paperInput");
 const paperPreview = document.getElementById("paperPreview");
+const paperAddBtn = document.getElementById("paperAddBtn");
 const refreshQueueBtn = document.getElementById("refreshQueueBtn");
 const clearDoneBtn = document.getElementById("clearDoneBtn");
 const paperQueueSummary = document.getElementById("paperQueueSummary");
@@ -183,21 +184,23 @@ async function loadPaperQueue() {
 function updateActionState() {
   if (!appConnected) {
     clipBtn.disabled = true;
-    clipBtn.textContent = currentMode === "paper"
-      ? "➕ App not running — cannot queue"
-      : "📎 App not running — cannot save";
+    clipBtn.textContent = "📎 App not running — cannot save";
+    paperAddBtn.disabled = true;
+    paperAddBtn.textContent = "➕ App not running — cannot queue";
     return;
   }
 
   if (currentMode === "paper") {
     const arxivId = parseArxivInput(paperInput.value || pageUrl);
-    clipBtn.disabled = !arxivId || !projectSelect.value;
-    clipBtn.textContent = "➕ Add to Background Queue";
+    paperAddBtn.disabled = !arxivId || !projectSelect.value;
+    paperAddBtn.textContent = "➕ Add to Background Queue";
+    clipBtn.disabled = true;
     return;
   }
 
   clipBtn.disabled = !extractedContent || !projectSelect.value;
   clipBtn.textContent = "📎 Save Raw Source";
+  paperAddBtn.disabled = true;
 }
 
 function updatePaperPreview() {
@@ -226,6 +229,8 @@ function setMode(mode) {
   paperModeBtn.classList.toggle("active", mode === "paper");
   webFields.classList.toggle("hidden", mode !== "web");
   paperFields.classList.toggle("hidden", mode !== "paper");
+  clipBtn.classList.toggle("hidden", mode === "paper");
+  paperAddBtn.classList.toggle("hidden", mode !== "paper");
 
   if (mode === "paper") {
     const currentId = parseArxivInput(pageUrl);
@@ -845,7 +850,7 @@ async function queuePaper() {
     return;
   }
 
-  clipBtn.disabled = true;
+  paperAddBtn.disabled = true;
 
   try {
     const projectName = projectSelect.options[projectSelect.selectedIndex]?.textContent || selectedProject;
@@ -902,12 +907,9 @@ function resizePreview() {
 }
 
 clipBtn.addEventListener("click", () => {
-  if (currentMode === "paper") {
-    queuePaper();
-  } else {
-    sendClip();
-  }
+  sendClip();
 });
+paperAddBtn.addEventListener("click", () => queuePaper());
 webModeBtn.addEventListener("click", () => setMode("web"));
 paperModeBtn.addEventListener("click", () => setMode("paper"));
 paperInput.addEventListener("input", updatePaperPreview);

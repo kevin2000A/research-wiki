@@ -233,6 +233,10 @@
     .btn-primary { background: #4f46e5; color: white; }
     .btn-primary:hover { background: #4338ca; }
     .btn-primary:disabled { background: #9ca3af; cursor: not-allowed; }
+    .paper-action-btn {
+      margin-top: 8px;
+      margin-bottom: 8px;
+    }
     .footer {
       padding: 6px 16px;
       border-top: 1px solid #e5e7eb;
@@ -291,6 +295,10 @@
         <label>Paper Preview</label>
         <div id="paperPreview" class="preview-box">Enter an arXiv URL, alphaXiv URL, or paper ID.</div>
       </div>
+
+      <button class="btn btn-primary paper-action-btn" id="paperAddBtn" type="button" disabled>
+        ➕ Add to Background Queue
+      </button>
 
       <div class="queue-toolbar">
         <div id="paperQueueSummary" class="queue-summary">No queued papers yet.</div>
