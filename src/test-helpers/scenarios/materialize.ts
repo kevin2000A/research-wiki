@@ -20,6 +20,10 @@ type AnyScenario = {
   // optional per-domain fields
   reviews?: unknown
   pageToEnrich?: string
+  source?: { path: string; content: string }
+  analysisResponse?: string
+  generationResponse?: string
+  query?: string
 }
 
 export async function materializeScenario(
@@ -63,6 +67,45 @@ export async function materializeScenario(
     await fs.writeFile(
       path.join(scenarioPath, "llm-response.txt"),
       scenario.llmResponse,
+      "utf-8",
+    )
+  }
+
+  // Ingest scenarios emit TWO LLM responses (stage 1 analysis + stage 2 generation).
+  if (scenario.analysisResponse !== undefined) {
+    await fs.writeFile(
+      path.join(scenarioPath, "llm-analysis.txt"),
+      scenario.analysisResponse,
+      "utf-8",
+    )
+  }
+  if (scenario.generationResponse !== undefined) {
+    await fs.writeFile(
+      path.join(scenarioPath, "llm-generation.txt"),
+      scenario.generationResponse,
+      "utf-8",
+    )
+  }
+
+  // Source doc for ingest scenarios — materialize it under initial-wiki/
+  // at the scenario-declared path.
+  if (scenario.source !== undefined) {
+    const sourceFull = path.join(scenarioPath, "initial-wiki", scenario.source.path)
+    await fs.mkdir(path.dirname(sourceFull), { recursive: true })
+    await fs.writeFile(sourceFull, scenario.source.content, "utf-8")
+    // Also record the path for the runner to read
+    await fs.writeFile(
+      path.join(scenarioPath, "source-path.txt"),
+      scenario.source.path,
+      "utf-8",
+    )
+  }
+
+  // Search scenarios record the query
+  if (scenario.query !== undefined) {
+    await fs.writeFile(
+      path.join(scenarioPath, "query.txt"),
+      scenario.query,
       "utf-8",
     )
   }
