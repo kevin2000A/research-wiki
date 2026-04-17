@@ -173,6 +173,20 @@ export function SourcesView() {
       // Step 2: Delete the source file
       await deleteFile(node.path)
 
+      // Delete hidden companion artifacts for arXiv paper bundles
+      for (const companion of hiddenPaperCompanionArtifacts(node)) {
+        try {
+          await deleteFile(companion.path)
+        } catch {
+          // companion may not exist
+        }
+        try {
+          await deleteFile(`${pp}/raw/sources/.cache/${companion.name}.txt`)
+        } catch {
+          // cache file may not exist
+        }
+      }
+
       // Step 3: Delete preprocessed cache
       try {
         await deleteFile(`${pp}/raw/sources/.cache/${fileName}.txt`)
@@ -477,12 +491,35 @@ function isHiddenPaperArtifact(node: FileNode, siblingNames: Set<string>): boole
   if (node.is_dir) return false
   const lower = node.name.toLowerCase()
   if (lower.endsWith("-source.tar.gz")) return true
+  if (lower.endsWith("-arxiv2md.md")) {
+    const stem = lower.slice(0, -"-arxiv2md.md".length)
+    return isArxivStem(stem) && siblingNames.has(`${stem}-paper.md`)
+  }
   if (!lower.endsWith(".pdf")) return false
   const stem = lower.slice(0, -4)
-  const looksLikeArxivId =
+  return isArxivStem(stem) && siblingNames.has(`${stem}-paper.md`)
+}
+
+function isArxivStem(stem: string): boolean {
+  return (
     /^\d{4}\.\d{4,5}(?:v\d+)?$/.test(stem) ||
     /^[a-z-]+(?:\.[a-z]+)?-\d{7}(?:v\d+)?$/i.test(stem)
-  return looksLikeArxivId && siblingNames.has(`${stem}-paper.md`)
+  )
+}
+
+function hiddenPaperCompanionArtifacts(node: FileNode): Array<{ path: string; name: string }> {
+  if (node.is_dir || !node.name.toLowerCase().endsWith("-paper.md")) return []
+  const dirIndex = node.path.lastIndexOf("/")
+  const dir = dirIndex >= 0 ? node.path.slice(0, dirIndex) : ""
+  const stem = node.name.slice(0, -"-paper.md".length)
+  return [
+    `${stem}-arxiv2md.md`,
+    `${stem}-source.tar.gz`,
+    `${stem}.pdf`,
+  ].map((name) => ({
+    name,
+    path: dir ? `${dir}/${name}` : name,
+  }))
 }
 
 function countFiles(nodes: FileNode[]): number {
