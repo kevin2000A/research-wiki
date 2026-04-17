@@ -47,13 +47,16 @@ function safeArxivFileStem(arxivId) {
 }
 
 function paperUrls(arxivId) {
+  const absUrl = `https://arxiv.org/abs/${arxivId}`;
   const encoded = arxivId
     .split("/")
     .map((part) => encodeURIComponent(part))
     .join("/");
+  const commonParams = `url=${encodeURIComponent(absUrl)}&remove_refs=true&remove_toc=true&remove_citations=true`;
   return {
-    abs: `https://arxiv.org/abs/${arxivId}`,
-    source: `https://arxiv.org/e-print/${encoded}`,
+    abs: absUrl,
+    arxiv2mdMarkdown: `https://arxiv2md.org/api/markdown?${commonParams}`,
+    arxiv2mdJson: `https://arxiv2md.org/api/json?${commonParams}`,
     pdf: `https://arxiv.org/pdf/${encoded}.pdf`,
   };
 }
@@ -214,10 +217,10 @@ function updatePaperPreview() {
   const urls = paperUrls(arxivId);
   paperPreview.textContent = [
     `ID: ${arxivId}`,
-    `Source package: ${urls.source}`,
+    `Markdown API: ${urls.arxiv2mdMarkdown}`,
+    `Metadata API: ${urls.arxiv2mdJson}`,
+    `Raw markdown: ${safeArxivFileStem(arxivId)}-arxiv2md.md`,
     `PDF fallback: ${urls.pdf}`,
-    `Raw source: ${safeArxivFileStem(arxivId)}-source.tar.gz`,
-    `Raw PDF fallback: ${safeArxivFileStem(arxivId)}.pdf`,
     `Paper bundle: ${safeArxivFileStem(arxivId)}-paper.md`,
   ].join("\n");
   updateActionState();

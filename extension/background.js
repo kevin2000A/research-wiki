@@ -18,15 +18,23 @@ function parseArxivInput(value) {
   return newMatch ? newMatch[1] : "";
 }
 
-function encodeArxivPath(arxivId) {
-  return arxivId
+function safeArxivFileStem(arxivId) {
+  return arxivId.replace(/[^A-Za-z0-9._-]/g, "-");
+}
+
+function paperUrls(arxivId) {
+  const absUrl = `https://arxiv.org/abs/${arxivId}`;
+  const encodedArxivId = arxivId
     .split("/")
     .map((part) => encodeURIComponent(part))
     .join("/");
-}
-
-function safeArxivFileStem(arxivId) {
-  return arxivId.replace(/[^A-Za-z0-9._-]/g, "-");
+  const commonParams = `url=${encodeURIComponent(absUrl)}&remove_refs=true&remove_toc=true&remove_citations=true`;
+  return {
+    abs: absUrl,
+    arxiv2mdMarkdown: `https://arxiv2md.org/api/markdown?${commonParams}`,
+    arxiv2mdJson: `https://arxiv2md.org/api/json?${commonParams}`,
+    pdf: `https://arxiv.org/pdf/${encodedArxivId}.pdf`,
+  };
 }
 
 function queueTaskKey(task) {
@@ -41,6 +49,11 @@ function arrayBufferToBase64(buffer) {
     binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
   }
   return btoa(binary);
+}
+
+function textToBase64(text) {
+  const bytes = new TextEncoder().encode(text);
+  return arrayBufferToBase64(bytes.buffer);
 }
 
 function storageGet(key) {
@@ -239,6 +252,49 @@ async function fetchBinaryArtifact(url, defaultMimeType) {
   return { buffer, mimeType };
 }
 
+async function fetchArxiv2mdArtifact(task) {
+  const urls = paperUrls(task.arxivId);
+  const markdownResponse = await fetch(urls.arxiv2mdMarkdown, { method: "GET", redirect: "follow" });
+  if (!markdownResponse.ok) {
+    throw new Error(`arxiv2md markdown HTTP ${markdownResponse.status}`);
+  }
+  const markdown = await markdownResponse.text();
+  if (!markdown.trim()) {
+    throw new Error("arxiv2md markdown was empty");
+  }
+
+  let paperTitle = `arXiv ${task.arxivId}`;
+  let paperSourceUrl = urls.abs;
+  let metadataError = "";
+  try {
+    const metadataResponse = await fetch(urls.arxiv2mdJson, { method: "GET", redirect: "follow" });
+    if (!metadataResponse.ok) {
+      throw new Error(`arxiv2md metadata HTTP ${metadataResponse.status}`);
+    }
+    const metadata = await metadataResponse.json();
+    if (typeof metadata?.title === "string" && metadata.title.trim()) {
+      paperTitle = metadata.title.trim();
+    }
+    if (typeof metadata?.source_url === "string" && metadata.source_url.trim()) {
+      paperSourceUrl = metadata.source_url.trim();
+    }
+  } catch (error) {
+    metadataError = error instanceof Error ? error.message : String(error);
+  }
+
+  return {
+    artifactKind: "arxiv2md",
+    fileName: `${safeArxivFileStem(task.arxivId)}-arxiv2md.md`,
+    mimeType: "text/markdown",
+    sourceUrl: urls.arxiv2mdMarkdown,
+    metadataUrl: urls.arxiv2mdJson,
+    paperTitle,
+    paperSourceUrl,
+    metadataError,
+    dataBase64: textToBase64(markdown),
+  };
+}
+
 async function saveArtifactToApp(task, artifact) {
   const response = await fetch(`${API_URL}/paper`, {
     method: "POST",
@@ -250,6 +306,9 @@ async function saveArtifactToApp(task, artifact) {
       fileName: artifact.fileName,
       mimeType: artifact.mimeType,
       sourceUrl: artifact.sourceUrl,
+      metadataUrl: artifact.metadataUrl,
+      paperTitle: artifact.paperTitle,
+      paperSourceUrl: artifact.paperSourceUrl,
       dataBase64: artifact.dataBase64,
     }),
   });
@@ -270,67 +329,60 @@ async function saveArtifactToApp(task, artifact) {
 }
 
 async function processPaperTask(task) {
-  const encodedId = encodeArxivPath(task.arxivId);
+  const urls = paperUrls(task.arxivId);
   const stem = safeArxivFileStem(task.arxivId);
-  const sourceUrl = `https://arxiv.org/e-print/${encodedId}`;
 
   await updateTask(task.id, (item) => {
     item.status = "fetching";
-    item.statusText = "Downloading arXiv source package";
+    item.statusText = "Downloading arxiv2md markdown";
     item.error = "";
     item.attemptCount += 1;
   });
 
-  let sourceArtifact = null;
-  let sourceDownloadError = "";
+  let markdownArtifact = null;
+  let markdownDownloadError = "";
   try {
-    const sourceDownload = await fetchBinaryArtifact(sourceUrl, "application/gzip");
-    sourceArtifact = {
-      artifactKind: "source",
-      fileName: `${stem}-source.tar.gz`,
-      mimeType: sourceDownload.mimeType || "application/gzip",
-      sourceUrl,
-      dataBase64: arrayBufferToBase64(sourceDownload.buffer),
-    };
+    markdownArtifact = await fetchArxiv2mdArtifact(task);
   } catch (error) {
-    sourceDownloadError = error instanceof Error ? error.message : String(error);
+    markdownDownloadError = error instanceof Error ? error.message : String(error);
   }
 
-  if (sourceArtifact) {
+  if (markdownArtifact) {
     await updateTask(task.id, (item) => {
       item.status = "saving";
-      item.statusText = "Saving arXiv source package to LLM Wiki";
-      item.artifactKind = "source";
-      item.fileName = sourceArtifact.fileName;
+      item.statusText = markdownArtifact.metadataError
+        ? `Saving arxiv2md markdown (metadata unavailable: ${markdownArtifact.metadataError})`
+        : "Saving arxiv2md markdown to LLM Wiki";
+      item.artifactKind = "arxiv2md";
+      item.fileName = markdownArtifact.fileName;
       item.error = "";
     });
 
-    const result = await saveArtifactToApp(task, sourceArtifact);
+    const result = await saveArtifactToApp(task, markdownArtifact);
     return {
-      artifactKind: "source",
-      fileName: sourceArtifact.fileName,
+      artifactKind: "arxiv2md",
+      fileName: markdownArtifact.fileName,
       paperPath: result.paperPath || "",
       statusText: result.paperPath
-        ? `Saved source bundle to ${result.paperPath}`
-        : "Saved source bundle",
+        ? `Saved arxiv2md bundle to ${result.paperPath}`
+        : "Saved arxiv2md bundle",
     };
   }
 
   await updateTask(task.id, (item) => {
     item.status = "fetching";
-    item.statusText = sourceDownloadError
-      ? `Source unavailable (${sourceDownloadError}); downloading PDF fallback`
-      : "Source unavailable; downloading PDF fallback";
+    item.statusText = markdownDownloadError
+      ? `arxiv2md unavailable (${markdownDownloadError}); downloading PDF fallback`
+      : "arxiv2md unavailable; downloading PDF fallback";
     item.error = "";
   });
 
-  const pdfUrl = `https://arxiv.org/pdf/${encodedId}.pdf`;
-  const pdfDownload = await fetchBinaryArtifact(pdfUrl, "application/pdf");
+  const pdfDownload = await fetchBinaryArtifact(urls.pdf, "application/pdf");
   const pdfArtifact = {
     artifactKind: "pdf",
     fileName: `${stem}.pdf`,
     mimeType: pdfDownload.mimeType || "application/pdf",
-    sourceUrl: pdfUrl,
+    sourceUrl: urls.pdf,
     dataBase64: arrayBufferToBase64(pdfDownload.buffer),
   };
 
