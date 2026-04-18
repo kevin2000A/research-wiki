@@ -523,6 +523,68 @@ fn handle_paper(body: &str) -> String {
         );
     }
 
+    let stem = sanitize_file_name(&arxiv_id.replace('/', "-"));
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    if artifact_kind == "arxiv2md" {
+        let paper_content = match String::from_utf8(bytes) {
+            Ok(markdown) => markdown,
+            Err(e) => {
+                return format!(
+                    r#"{{"ok":false,"error":"arxiv2md markdown is not UTF-8: {}"}}"#,
+                    e
+                )
+            }
+        };
+
+        let paper_path = unique_file_path(&dir_path, &format!("{}-paper.md", stem));
+        let paper_path_str = paper_path.to_string_lossy().to_string();
+        let paper_relative_path = {
+            let base = std::path::Path::new(&project_path);
+            paper_path
+                .strip_prefix(base)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| paper_path_str.replace('\\', "/"))
+        };
+
+        let combined_markdown = format!(
+            "---\ntype: arxiv-paper\ntitle: \"{}\"\narxiv_id: \"{}\"\nurl: \"{}\"\narxiv2md_url: \"{}\"\narxiv2md_metadata_url: \"{}\"\nartifact_path: \"\"\nartifact_kind: \"{}\"\nartifact_mime: \"{}\"\nclipped: {}\norigin: arxiv2md\nsources: []\ntags: [arxiv, paper]\n---\n\n# {}\n\n## Paper Content\n\n{}\n\n## Original Artifact\n\n- Artifact kind: `{}`\n- Embedded in this file: `yes`\n- arxiv2md Markdown API: `{}`\n- arxiv2md Metadata API: `{}`\n- Paper URL: `{}`\n",
+            yaml_escape(&paper_title),
+            yaml_escape(arxiv_id),
+            yaml_escape(&paper_source_url),
+            yaml_escape(source_url),
+            yaml_escape(metadata_url),
+            yaml_escape(artifact_kind),
+            yaml_escape(mime_type),
+            date,
+            paper_title,
+            paper_content,
+            artifact_kind,
+            source_url,
+            metadata_url,
+            paper_source_url,
+        );
+        if let Err(e) = std::fs::write(&paper_path, combined_markdown) {
+            return format!(
+                r#"{{"ok":false,"error":"Failed to write combined paper markdown: {}"}}"#,
+                e
+            );
+        }
+
+        if let Ok(mut pending) = PENDING_CLIPS.lock() {
+            pending.push((project_path.clone(), paper_path_str, false));
+        }
+
+        return serde_json::json!({
+            "ok": true,
+            "path": paper_relative_path,
+            "paperPath": paper_relative_path,
+            "arxivId": arxiv_id,
+            "artifactKind": artifact_kind,
+            "autoIngest": false,
+        }).to_string();
+    }
+
     let file_path = unique_file_path(&dir_path, &file_name);
     if let Err(e) = std::fs::write(&file_path, &bytes) {
         return format!(
@@ -540,19 +602,24 @@ fn handle_paper(body: &str) -> String {
             .unwrap_or_else(|_| file_path_str.replace('\\', "/"))
     };
 
+    if artifact_kind == "pdf" {
+        if let Ok(mut pending) = PENDING_CLIPS.lock() {
+            pending.push((project_path.clone(), file_path_str, false));
+        }
+
+        return serde_json::json!({
+            "ok": true,
+            "path": relative_path,
+            "paperPath": relative_path,
+            "arxivId": arxiv_id,
+            "artifactKind": artifact_kind,
+            "autoIngest": false,
+        }).to_string();
+    }
+
     let mut extracted_assets_path: Option<String> = None;
     let mut parse_error: Option<String> = None;
-    let paper_content = if artifact_kind == "arxiv2md" {
-        match String::from_utf8(bytes) {
-            Ok(markdown) => markdown,
-            Err(e) => {
-                return format!(
-                    r#"{{"ok":false,"error":"arxiv2md markdown is not UTF-8: {}"}}"#,
-                    e
-                )
-            }
-        }
-    } else if artifact_kind == "source" {
+    let paper_content = if artifact_kind == "source" {
         match parse_arxiv_source_package(&project_path, arxiv_id, &file_path) {
             Ok(parsed) => {
                 extracted_assets_path = Some(parsed.assets_relative_path);
@@ -574,7 +641,6 @@ fn handle_paper(body: &str) -> String {
         )
     };
 
-    let stem = sanitize_file_name(&arxiv_id.replace('/', "-"));
     let paper_path = unique_file_path(&dir_path, &format!("{}-paper.md", stem));
     let paper_path_str = paper_path.to_string_lossy().to_string();
     let paper_relative_path = {
@@ -602,49 +668,26 @@ fn handle_paper(body: &str) -> String {
         .as_ref()
         .map(|error| format!("- Source conversion error: `{}`", error.replace('`', "'")))
         .unwrap_or_else(|| "- Source conversion error: none".to_string());
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let combined_markdown = if artifact_kind == "arxiv2md" {
-        format!(
-            "---\ntype: arxiv-paper\ntitle: \"{}\"\narxiv_id: \"{}\"\nurl: \"{}\"\narxiv2md_url: \"{}\"\narxiv2md_metadata_url: \"{}\"\nartifact_path: \"{}\"\nartifact_kind: \"{}\"\nartifact_mime: \"{}\"\nclipped: {}\norigin: arxiv2md\nsources: []\ntags: [arxiv, paper]\n---\n\n# {}\n\n## Paper Content\n\n{}\n\n## Original Artifact\n\n- Artifact kind: `{}`\n- Raw markdown path: `{}`\n- arxiv2md Markdown API: `{}`\n- arxiv2md Metadata API: `{}`\n- Paper URL: `{}`\n",
-            yaml_escape(&paper_title),
-            yaml_escape(arxiv_id),
-            yaml_escape(&paper_source_url),
-            yaml_escape(source_url),
-            yaml_escape(metadata_url),
-            yaml_escape(&relative_path),
-            yaml_escape(artifact_kind),
-            yaml_escape(mime_type),
-            date,
-            paper_title,
-            paper_content,
-            artifact_kind,
-            relative_path,
-            source_url,
-            metadata_url,
-            paper_source_url,
-        )
-    } else {
-        format!(
-            "---\ntype: arxiv-paper\ntitle: \"arXiv {}\"\narxiv_id: \"{}\"\nurl: \"https://arxiv.org/abs/{}\"\noverview_url: \"{}\"\nartifact_url: \"{}\"\nartifact_path: \"{}\"\nartifact_kind: \"{}\"\nartifact_mime: \"{}\"\nclipped: {}\norigin: arxiv-paper\nsources: []\ntags: [arxiv, paper]\n---\n\n# arXiv {}\n\n## alphaXiv Overview\n\n{}\n\n## Paper Content\n\n{}\n\n## Original Artifact\n\n- Artifact kind: `{}`\n- Artifact path: `{}`\n- Artifact URL: `{}`\n{}\n{}\n",
-            yaml_escape(arxiv_id),
-            yaml_escape(arxiv_id),
-            yaml_escape(arxiv_id),
-            yaml_escape(overview_url),
-            yaml_escape(source_url),
-            yaml_escape(&relative_path),
-            yaml_escape(artifact_kind),
-            yaml_escape(mime_type),
-            date,
-            arxiv_id,
-            overview_section,
-            paper_content,
-            artifact_kind,
-            relative_path,
-            source_url,
-            extracted_assets_line,
-            parse_error_line,
-        )
-    };
+    let combined_markdown = format!(
+        "---\ntype: arxiv-paper\ntitle: \"arXiv {}\"\narxiv_id: \"{}\"\nurl: \"https://arxiv.org/abs/{}\"\noverview_url: \"{}\"\nartifact_url: \"{}\"\nartifact_path: \"{}\"\nartifact_kind: \"{}\"\nartifact_mime: \"{}\"\nclipped: {}\norigin: arxiv-paper\nsources: []\ntags: [arxiv, paper]\n---\n\n# arXiv {}\n\n## alphaXiv Overview\n\n{}\n\n## Paper Content\n\n{}\n\n## Original Artifact\n\n- Artifact kind: `{}`\n- Artifact path: `{}`\n- Artifact URL: `{}`\n{}\n{}\n",
+        yaml_escape(arxiv_id),
+        yaml_escape(arxiv_id),
+        yaml_escape(arxiv_id),
+        yaml_escape(overview_url),
+        yaml_escape(source_url),
+        yaml_escape(&relative_path),
+        yaml_escape(artifact_kind),
+        yaml_escape(mime_type),
+        date,
+        arxiv_id,
+        overview_section,
+        paper_content,
+        artifact_kind,
+        relative_path,
+        source_url,
+        extracted_assets_line,
+        parse_error_line,
+    );
     if let Err(e) = std::fs::write(&paper_path, combined_markdown) {
         return format!(
             r#"{{"ok":false,"error":"Failed to write combined paper markdown: {}"}}"#,
