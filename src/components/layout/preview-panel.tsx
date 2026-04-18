@@ -5,14 +5,18 @@ import { readFile, writeFile } from "@/commands/fs"
 import { getFileCategory, isBinary } from "@/lib/file-types"
 import { WikiEditor } from "@/components/editor/wiki-editor"
 import { FilePreview } from "@/components/editor/file-preview"
-import { getFileName, normalizePath } from "@/lib/path-utils"
+import { getFileName, getRelativePath, normalizePath } from "@/lib/path-utils"
 
-function isWikiMarkdown(filePath: string): boolean {
+function isWikiMarkdown(filePath: string, projectPath: string | null): boolean {
   const normalized = normalizePath(filePath)
-  return normalized.includes("/wiki/") && normalized.endsWith(".md")
+  if (!normalized.endsWith(".md")) return false
+  if (!projectPath) return false
+  const relative = getRelativePath(normalized, normalizePath(projectPath))
+  return relative.startsWith("wiki/")
 }
 
 export function PreviewPanel() {
+  const project = useWikiStore((s) => s.project)
   const selectedFile = useWikiStore((s) => s.selectedFile)
   const fileContent = useWikiStore((s) => s.fileContent)
   const setFileContent = useWikiStore((s) => s.setFileContent)
@@ -66,7 +70,7 @@ export function PreviewPanel() {
 
   const category = getFileCategory(selectedFile)
   const fileName = getFileName(selectedFile)
-  const useWikiEditor = category === "markdown" && isWikiMarkdown(selectedFile)
+  const useWikiEditor = category === "markdown" && isWikiMarkdown(selectedFile, project?.path ?? null)
 
   return (
     <div className="flex h-full flex-col">
