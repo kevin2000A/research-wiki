@@ -34,6 +34,8 @@ export function FilePreview({ filePath, textContent }: FilePreviewProps) {
       return <AudioPreview filePath={filePath} fileName={fileName} />
     case "pdf":
       return <TextPreview filePath={filePath} content={textContent} label="PDF (extracted text)" />
+    case "markdown":
+      return <TextPreview filePath={filePath} content={stripFrontmatter(textContent)} label="Markdown" />
     case "code":
       return <CodePreview filePath={filePath} content={textContent} />
     case "data":
@@ -45,6 +47,16 @@ export function FilePreview({ filePath, textContent }: FilePreviewProps) {
     default:
       return <BinaryPlaceholder filePath={filePath} fileName={fileName} category={category} />
   }
+}
+
+function stripFrontmatter(content: string): string {
+  const normalized = content.replace(/\r\n/g, "\n")
+  if (!normalized.startsWith("---\n")) return content
+
+  const endIndex = normalized.indexOf("\n---\n", 4)
+  if (endIndex === -1) return content
+
+  return normalized.slice(endIndex + "\n---\n".length)
 }
 
 function ImagePreview({ filePath, fileName }: { filePath: string; fileName: string }) {
