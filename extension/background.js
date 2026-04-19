@@ -1,6 +1,11 @@
 const API_URL = "http://127.0.0.1:19827";
 const QUEUE_STORAGE_KEY = "llmWikiPaperQueueV1";
 const QUEUE_ALARM = "llmWikiPaperQueueTick";
+const DEFAULT_ARXIV_SETTINGS = {
+  removeRefs: false,
+  removeToc: false,
+  removeCitations: false,
+};
 
 let processing = false;
 
@@ -22,13 +27,27 @@ function safeArxivFileStem(arxivId) {
   return arxivId.replace(/[^A-Za-z0-9._-]/g, "-");
 }
 
-function paperUrls(arxivId) {
+function normalizeArxivSettings(value) {
+  return {
+    removeRefs: Boolean(value?.removeRefs),
+    removeToc: Boolean(value?.removeToc),
+    removeCitations: Boolean(value?.removeCitations),
+  };
+}
+
+function paperUrls(arxivId, settings = DEFAULT_ARXIV_SETTINGS) {
   const absUrl = `https://arxiv.org/abs/${arxivId}`;
   const encodedArxivId = arxivId
     .split("/")
     .map((part) => encodeURIComponent(part))
     .join("/");
-  const commonParams = `url=${encodeURIComponent(absUrl)}&remove_refs=true&remove_toc=true&remove_citations=true`;
+  const flags = normalizeArxivSettings(settings);
+  const commonParams = [
+    `url=${encodeURIComponent(absUrl)}`,
+    `remove_refs=${flags.removeRefs}`,
+    `remove_toc=${flags.removeToc}`,
+    `remove_citations=${flags.removeCitations}`,
+  ].join("&");
   return {
     abs: absUrl,
     arxiv2mdMarkdown: `https://arxiv2md.org/api/markdown?${commonParams}`,
@@ -116,6 +135,7 @@ function normalizeTask(task) {
     artifactKind: typeof task?.artifactKind === "string" ? task.artifactKind : "",
     fileName: typeof task?.fileName === "string" ? task.fileName : "",
     paperPath: typeof task?.paperPath === "string" ? task.paperPath : "",
+    arxivSettings: normalizeArxivSettings(task?.arxivSettings || DEFAULT_ARXIV_SETTINGS),
   };
 }
 
@@ -196,6 +216,7 @@ async function enqueuePaperTask(payload) {
     artifactKind: "",
     fileName: "",
     paperPath: "",
+    arxivSettings: normalizeArxivSettings(payload?.arxivSettings || DEFAULT_ARXIV_SETTINGS),
   });
 
   state.tasks.push(task);
@@ -253,7 +274,7 @@ async function fetchBinaryArtifact(url, defaultMimeType) {
 }
 
 async function fetchArxiv2mdArtifact(task) {
-  const urls = paperUrls(task.arxivId);
+  const urls = paperUrls(task.arxivId, task.arxivSettings);
   const markdownResponse = await fetch(urls.arxiv2mdMarkdown, { method: "GET", redirect: "follow" });
   if (!markdownResponse.ok) {
     throw new Error(`arxiv2md markdown HTTP ${markdownResponse.status}`);
@@ -329,7 +350,7 @@ async function saveArtifactToApp(task, artifact) {
 }
 
 async function processPaperTask(task) {
-  const urls = paperUrls(task.arxivId);
+  const urls = paperUrls(task.arxivId, task.arxivSettings);
   const stem = safeArxivFileStem(task.arxivId);
 
   await updateTask(task.id, (item) => {
