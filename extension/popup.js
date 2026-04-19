@@ -32,6 +32,8 @@ let appConnected = false;
 let currentMode = "web";
 let webExtractionStarted = false;
 let queueTasks = [];
+let queueStateVersion = 0;
+let queueLoadRequestId = 0;
 const ARXIV_SETTINGS_KEY = "llmWikiArxiv2mdSettingsV1";
 const DEFAULT_ARXIV_SETTINGS = {
   removeRefs: false,
@@ -237,6 +239,12 @@ function renderPaperQueue() {
   }).join("");
 }
 
+function setQueueTasks(tasks, bumpVersion = false) {
+  if (bumpVersion) queueStateVersion += 1;
+  queueTasks = sortQueueTasks(tasks || []);
+  renderPaperQueue();
+}
+
 function sendBackgroundMessage(message) {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(message, (response) => {
@@ -254,16 +262,21 @@ function sendBackgroundMessage(message) {
 }
 
 async function loadPaperQueue() {
+  const requestId = ++queueLoadRequestId;
+  const versionAtStart = queueStateVersion;
+
   try {
     const response = await sendBackgroundMessage({ type: "paperQueue/get" });
-    queueTasks = sortQueueTasks(response.tasks || []);
+    if (requestId !== queueLoadRequestId || versionAtStart !== queueStateVersion) return;
+    setQueueTasks(response.tasks || []);
   } catch (err) {
+    if (requestId !== queueLoadRequestId || versionAtStart !== queueStateVersion) return;
     queueTasks = [];
+    renderPaperQueue();
     if (currentMode === "paper") {
       setStatus("error", `✗ Failed to load background queue: ${err.message}`);
     }
   }
-  renderPaperQueue();
 }
 
 function updateActionState() {
@@ -949,8 +962,7 @@ async function queuePaper() {
       projectName,
       arxivSettings: currentArxivSettings,
     });
-    queueTasks = sortQueueTasks(response.tasks || queueTasks);
-    renderPaperQueue();
+    setQueueTasks(response.tasks || queueTasks, true);
     setStatus(
       "success",
       response.duplicate
@@ -976,6 +988,7 @@ async function handlePaperQueueAction(action, taskId) {
     } else {
       return;
     }
+    queueStateVersion += 1;
     await loadPaperQueue();
     await sendBackgroundMessage({ type: "paperQueue/process" });
   } catch (err) {
@@ -1023,6 +1036,7 @@ refreshQueueBtn.addEventListener("click", () => loadPaperQueue());
 clearDoneBtn.addEventListener("click", async () => {
   try {
     await sendBackgroundMessage({ type: "paperQueue/clearDone" });
+    queueStateVersion += 1;
     await loadPaperQueue();
     setStatus("success", "✓ Cleared completed downloads");
   } catch (err) {
@@ -1036,8 +1050,7 @@ paperQueueList.addEventListener("click", (event) => {
 });
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type !== "paperQueueUpdated") return;
-  queueTasks = sortQueueTasks(message.tasks || []);
-  renderPaperQueue();
+  setQueueTasks(message.tasks || [], true);
 });
 
 (async () => {
