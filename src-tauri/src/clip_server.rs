@@ -18,6 +18,8 @@ const MAX_BIND_RETRIES: u32 = 3;
 const MAX_RESTART_RETRIES: u32 = 10;
 const BIND_RETRY_DELAY_SECS: u64 = 2;
 const RESTART_DELAY_SECS: u64 = 5;
+const ARXIV2MD_MARKDOWN_API: &str = "https://arxiv2md.org/api/markdown";
+const ARXIV2MD_METADATA_API: &str = "https://arxiv2md.org/api/json";
 
 /// Get current daemon status as a string
 pub fn get_daemon_status() -> &'static str {
@@ -480,19 +482,23 @@ fn handle_paper(body: &str) -> String {
         _ => return r#"{"ok":false,"error":"arxivId is required"}"#.to_string(),
     };
     let source_url = parsed["sourceUrl"].as_str().unwrap_or("");
-    let metadata_url = parsed["metadataUrl"].as_str().unwrap_or("");
     let paper_title = parsed["paperTitle"]
         .as_str()
         .map(|title| title.trim())
         .filter(|title| !title.is_empty())
         .map(|title| title.to_string())
         .unwrap_or_else(|| format!("arXiv {}", arxiv_id));
-    let paper_source_url = parsed["paperSourceUrl"]
+    let paper_source_url = parsed["paperUrl"]
         .as_str()
+        .or_else(|| parsed["paperSourceUrl"].as_str())
         .map(|url| url.trim())
         .filter(|url| !url.is_empty())
         .map(|url| url.to_string())
         .unwrap_or_else(|| format!("https://arxiv.org/abs/{}", arxiv_id));
+    let arxiv_settings = &parsed["arxivSettings"];
+    let arxiv_remove_refs = arxiv_settings["removeRefs"].as_bool().unwrap_or(false);
+    let arxiv_remove_toc = arxiv_settings["removeToc"].as_bool().unwrap_or(false);
+    let arxiv_remove_citations = arxiv_settings["removeCitations"].as_bool().unwrap_or(false);
     let overview_url = parsed["overviewUrl"].as_str().unwrap_or("");
     let overview_markdown = parsed["overviewMarkdown"].as_str().unwrap_or("").trim();
     let overview_error = parsed["overviewError"].as_str().unwrap_or("");
@@ -548,21 +554,27 @@ fn handle_paper(body: &str) -> String {
         };
 
         let combined_markdown = format!(
-            "---\ntype: arxiv-paper\ntitle: \"{}\"\narxiv_id: \"{}\"\nurl: \"{}\"\narxiv2md_url: \"{}\"\narxiv2md_metadata_url: \"{}\"\nartifact_path: \"\"\nartifact_kind: \"{}\"\nartifact_mime: \"{}\"\nclipped: {}\norigin: arxiv2md\nsources: []\ntags: [arxiv, paper]\n---\n\n# {}\n\n## Paper Content\n\n{}\n\n## Original Artifact\n\n- Artifact kind: `{}`\n- Embedded in this file: `yes`\n- arxiv2md Markdown API: `{}`\n- arxiv2md Metadata API: `{}`\n- Paper URL: `{}`\n",
+            "---\ntype: arxiv-paper\ntitle: \"{}\"\narxiv_id: \"{}\"\nurl: \"{}\"\narxiv2md_markdown_api: \"{}\"\narxiv2md_metadata_api: \"{}\"\narxiv2md_remove_refs: {}\narxiv2md_remove_toc: {}\narxiv2md_remove_citations: {}\nartifact_path: \"\"\nartifact_kind: \"{}\"\nartifact_mime: \"{}\"\nclipped: {}\norigin: arxiv2md\nsources: []\ntags: [arxiv, paper]\n---\n\n# {}\n\n## Paper Content\n\n{}\n\n## Original Artifact\n\n- Artifact kind: `{}`\n- Embedded in this file: `yes`\n- Paper URL: `{}`\n- arxiv2md Markdown API: `{}`\n- arxiv2md Metadata API: `{}`\n- Options: `remove_refs={}`, `remove_toc={}`, `remove_citations={}`\n",
             yaml_escape(&paper_title),
             yaml_escape(arxiv_id),
             yaml_escape(&paper_source_url),
-            yaml_escape(source_url),
-            yaml_escape(metadata_url),
+            ARXIV2MD_MARKDOWN_API,
+            ARXIV2MD_METADATA_API,
+            arxiv_remove_refs,
+            arxiv_remove_toc,
+            arxiv_remove_citations,
             yaml_escape(artifact_kind),
             yaml_escape(mime_type),
             date,
             paper_title,
             paper_content,
             artifact_kind,
-            source_url,
-            metadata_url,
             paper_source_url,
+            ARXIV2MD_MARKDOWN_API,
+            ARXIV2MD_METADATA_API,
+            arxiv_remove_refs,
+            arxiv_remove_toc,
+            arxiv_remove_citations,
         );
         if let Err(e) = std::fs::write(&paper_path, combined_markdown) {
             return format!(
