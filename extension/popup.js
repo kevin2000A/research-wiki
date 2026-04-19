@@ -12,6 +12,10 @@ const webFields = document.getElementById("webFields");
 const paperFields = document.getElementById("paperFields");
 const paperInput = document.getElementById("paperInput");
 const paperPreview = document.getElementById("paperPreview");
+const paperSettingsSummary = document.getElementById("paperSettingsSummary");
+const removeRefsCheckbox = document.getElementById("removeRefsCheckbox");
+const removeTocCheckbox = document.getElementById("removeTocCheckbox");
+const removeCitationsCheckbox = document.getElementById("removeCitationsCheckbox");
 const paperAddBtn = document.getElementById("paperAddBtn");
 const refreshQueueBtn = document.getElementById("refreshQueueBtn");
 const clearDoneBtn = document.getElementById("clearDoneBtn");
@@ -26,6 +30,76 @@ let appConnected = false;
 let currentMode = "web";
 let webExtractionStarted = false;
 let queueTasks = [];
+const ARXIV_SETTINGS_KEY = "llmWikiArxiv2mdSettingsV1";
+const DEFAULT_ARXIV_SETTINGS = {
+  removeRefs: false,
+  removeToc: false,
+  removeCitations: false,
+};
+let currentArxivSettings = { ...DEFAULT_ARXIV_SETTINGS };
+
+function normalizeArxivSettings(value) {
+  return {
+    removeRefs: Boolean(value?.removeRefs),
+    removeToc: Boolean(value?.removeToc),
+    removeCitations: Boolean(value?.removeCitations),
+  };
+}
+
+function storageGet(key) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.get(key, (result) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(result[key]);
+    });
+  });
+}
+
+function storageSet(value) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.set(value, () => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function syncArxivSettingsInputs() {
+  removeRefsCheckbox.checked = currentArxivSettings.removeRefs;
+  removeTocCheckbox.checked = currentArxivSettings.removeToc;
+  removeCitationsCheckbox.checked = currentArxivSettings.removeCitations;
+  paperSettingsSummary.textContent = [
+    `refs: ${currentArxivSettings.removeRefs ? "on" : "off"}`,
+    `toc: ${currentArxivSettings.removeToc ? "on" : "off"}`,
+    `citations: ${currentArxivSettings.removeCitations ? "on" : "off"}`,
+  ].join(" · ");
+}
+
+async function loadArxivSettings() {
+  try {
+    const stored = await storageGet(ARXIV_SETTINGS_KEY);
+    currentArxivSettings = normalizeArxivSettings(stored || DEFAULT_ARXIV_SETTINGS);
+  } catch {
+    currentArxivSettings = { ...DEFAULT_ARXIV_SETTINGS };
+  }
+  syncArxivSettingsInputs();
+}
+
+async function persistArxivSettings() {
+  currentArxivSettings = normalizeArxivSettings({
+    removeRefs: removeRefsCheckbox.checked,
+    removeToc: removeTocCheckbox.checked,
+    removeCitations: removeCitationsCheckbox.checked,
+  });
+  syncArxivSettingsInputs();
+  await storageSet({ [ARXIV_SETTINGS_KEY]: currentArxivSettings });
+}
 
 function setStatus(kind, text) {
   statusBar.className = `status ${kind}`;
@@ -46,13 +120,19 @@ function safeArxivFileStem(arxivId) {
   return arxivId.replace(/[^A-Za-z0-9._-]/g, "-");
 }
 
-function paperUrls(arxivId) {
+function paperUrls(arxivId, settings = DEFAULT_ARXIV_SETTINGS) {
   const absUrl = `https://arxiv.org/abs/${arxivId}`;
   const encoded = arxivId
     .split("/")
     .map((part) => encodeURIComponent(part))
     .join("/");
-  const commonParams = `url=${encodeURIComponent(absUrl)}&remove_refs=true&remove_toc=true&remove_citations=true`;
+  const flags = normalizeArxivSettings(settings);
+  const commonParams = [
+    `url=${encodeURIComponent(absUrl)}`,
+    `remove_refs=${flags.removeRefs}`,
+    `remove_toc=${flags.removeToc}`,
+    `remove_citations=${flags.removeCitations}`,
+  ].join("&");
   return {
     abs: absUrl,
     arxiv2mdMarkdown: `https://arxiv2md.org/api/markdown?${commonParams}`,
@@ -214,9 +294,10 @@ function updatePaperPreview() {
     return;
   }
 
-  const urls = paperUrls(arxivId);
+  const urls = paperUrls(arxivId, currentArxivSettings);
   paperPreview.textContent = [
     `ID: ${arxivId}`,
+    `Flags: remove_refs=${currentArxivSettings.removeRefs}, remove_toc=${currentArxivSettings.removeToc}, remove_citations=${currentArxivSettings.removeCitations}`,
     `Markdown API: ${urls.arxiv2mdMarkdown}`,
     `Metadata API: ${urls.arxiv2mdJson}`,
     `Raw markdown: ${safeArxivFileStem(arxivId)}-arxiv2md.md`,
@@ -862,6 +943,7 @@ async function queuePaper() {
       arxivId,
       projectPath: selectedProject,
       projectName,
+      arxivSettings: currentArxivSettings,
     });
     queueTasks = sortQueueTasks(response.tasks || queueTasks);
     renderPaperQueue();
@@ -922,6 +1004,16 @@ paperInput.addEventListener("keydown", (event) => {
     queuePaper();
   }
 });
+for (const checkbox of [removeRefsCheckbox, removeTocCheckbox, removeCitationsCheckbox]) {
+  checkbox.addEventListener("change", async () => {
+    try {
+      await persistArxivSettings();
+      updatePaperPreview();
+    } catch (err) {
+      setStatus("error", `✗ Failed to save arXiv settings: ${err.message}`);
+    }
+  });
+}
 projectSelect.addEventListener("change", updateActionState);
 refreshQueueBtn.addEventListener("click", () => loadPaperQueue());
 clearDoneBtn.addEventListener("click", async () => {
@@ -945,6 +1037,7 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 (async () => {
+  await loadArxivSettings();
   await checkConnection();
   await loadCurrentTab();
   await loadPaperQueue();

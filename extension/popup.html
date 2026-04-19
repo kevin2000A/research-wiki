@@ -119,6 +119,49 @@
       color: #6b7280;
       line-height: 1.4;
     }
+    .settings-panel {
+      margin-bottom: 10px;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      background: white;
+      overflow: hidden;
+    }
+    .settings-panel summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 8px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #374151;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .settings-panel summary::-webkit-details-marker { display: none; }
+    .settings-summary {
+      font-size: 11px;
+      font-weight: 500;
+      color: #6b7280;
+    }
+    .settings-body {
+      border-top: 1px solid #e5e7eb;
+      padding: 8px 10px 10px;
+      display: grid;
+      gap: 8px;
+    }
+    .settings-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #374151;
+    }
+    .settings-option input {
+      width: auto;
+      margin: 0;
+      cursor: pointer;
+    }
     .queue-toolbar {
       display: flex;
       align-items: center;
@@ -301,6 +344,27 @@
         <input type="text" id="paperInput" placeholder="https://arxiv.org/abs/2401.12345 or 2401.12345">
         <div class="hint">Background queue downloads arxiv2md Markdown first, falls back to PDF only if needed, and only saves to raw/sources. Ingest later inside LLM Wiki.</div>
       </div>
+
+      <details id="paperSettingsPanel" class="settings-panel">
+        <summary>
+          <span>arXiv Settings</span>
+          <span id="paperSettingsSummary" class="settings-summary">refs: off · toc: off · citations: off</span>
+        </summary>
+        <div class="settings-body">
+          <label class="settings-option">
+            <input type="checkbox" id="removeRefsCheckbox">
+            <span>Remove references</span>
+          </label>
+          <label class="settings-option">
+            <input type="checkbox" id="removeTocCheckbox">
+            <span>Remove table of contents</span>
+          </label>
+          <label class="settings-option">
+            <input type="checkbox" id="removeCitationsCheckbox">
+            <span>Remove citations</span>
+          </label>
+        </div>
+      </details>
 
       <div class="field">
         <label>Paper Preview</label>
