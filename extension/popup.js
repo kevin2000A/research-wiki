@@ -1,4 +1,6 @@
 const API_URL = "http://127.0.0.1:19827";
+const ARXIV2MD_MARKDOWN_API = "https://arxiv2md.org/api/markdown";
+const ARXIV2MD_METADATA_API = "https://arxiv2md.org/api/json";
 
 const statusBar = document.getElementById("statusBar");
 const titleInput = document.getElementById("titleInput");
@@ -135,8 +137,8 @@ function paperUrls(arxivId, settings = DEFAULT_ARXIV_SETTINGS) {
   ].join("&");
   return {
     abs: absUrl,
-    arxiv2mdMarkdown: `https://arxiv2md.org/api/markdown?${commonParams}`,
-    arxiv2mdJson: `https://arxiv2md.org/api/json?${commonParams}`,
+    arxiv2mdMarkdown: `${ARXIV2MD_MARKDOWN_API}?${commonParams}`,
+    arxiv2mdJson: `${ARXIV2MD_METADATA_API}?${commonParams}`,
     pdf: `https://arxiv.org/pdf/${encoded}.pdf`,
   };
 }
@@ -297,12 +299,14 @@ function updatePaperPreview() {
   const urls = paperUrls(arxivId, currentArxivSettings);
   paperPreview.textContent = [
     `ID: ${arxivId}`,
-    `Flags: remove_refs=${currentArxivSettings.removeRefs}, remove_toc=${currentArxivSettings.removeToc}, remove_citations=${currentArxivSettings.removeCitations}`,
-    `Markdown API: ${urls.arxiv2mdMarkdown}`,
-    `Metadata API: ${urls.arxiv2mdJson}`,
-    `Raw markdown: ${safeArxivFileStem(arxivId)}-arxiv2md.md`,
-    `PDF fallback: ${urls.pdf}`,
+    `Paper URL: ${urls.abs}`,
+    `Markdown API: ${ARXIV2MD_MARKDOWN_API}`,
+    `Metadata API: ${ARXIV2MD_METADATA_API}`,
+    `remove_refs: ${currentArxivSettings.removeRefs}`,
+    `remove_toc: ${currentArxivSettings.removeToc}`,
+    `remove_citations: ${currentArxivSettings.removeCitations}`,
     `Paper bundle: ${safeArxivFileStem(arxivId)}-paper.md`,
+    `PDF fallback: ${urls.pdf}`,
   ].join("\n");
   updateActionState();
 }

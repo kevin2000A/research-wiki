@@ -1,4 +1,6 @@
 const API_URL = "http://127.0.0.1:19827";
+const ARXIV2MD_MARKDOWN_API = "https://arxiv2md.org/api/markdown";
+const ARXIV2MD_METADATA_API = "https://arxiv2md.org/api/json";
 const QUEUE_STORAGE_KEY = "llmWikiPaperQueueV1";
 const QUEUE_ALARM = "llmWikiPaperQueueTick";
 const DEFAULT_ARXIV_SETTINGS = {
@@ -50,8 +52,8 @@ function paperUrls(arxivId, settings = DEFAULT_ARXIV_SETTINGS) {
   ].join("&");
   return {
     abs: absUrl,
-    arxiv2mdMarkdown: `https://arxiv2md.org/api/markdown?${commonParams}`,
-    arxiv2mdJson: `https://arxiv2md.org/api/json?${commonParams}`,
+    arxiv2mdMarkdown: `${ARXIV2MD_MARKDOWN_API}?${commonParams}`,
+    arxiv2mdJson: `${ARXIV2MD_METADATA_API}?${commonParams}`,
     pdf: `https://arxiv.org/pdf/${encodedArxivId}.pdf`,
   };
 }
@@ -329,7 +331,9 @@ async function saveArtifactToApp(task, artifact) {
       sourceUrl: artifact.sourceUrl,
       metadataUrl: artifact.metadataUrl,
       paperTitle: artifact.paperTitle,
+      paperUrl: artifact.paperSourceUrl,
       paperSourceUrl: artifact.paperSourceUrl,
+      arxivSettings: task.arxivSettings,
       dataBase64: artifact.dataBase64,
     }),
   });
