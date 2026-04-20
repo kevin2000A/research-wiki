@@ -659,6 +659,12 @@ async function extractTweet() {
                 .filter(Boolean),
             );
           }
+          if (textNodes.length === 0) {
+            const ogDescription = document.querySelector('meta[property="og:description"]')?.getAttribute("content")?.trim() || "";
+            if (ogDescription) {
+              textNodes = [ogDescription];
+            }
+          }
           const timeNode = mainArticle.querySelector("time");
           const media = [];
           Array.from(mainArticle.querySelectorAll('[data-testid="tweetPhoto"] img')).forEach((img) => {
@@ -669,9 +675,6 @@ async function extractTweet() {
           });
           Array.from(mainArticle.querySelectorAll("video[poster]")).forEach((video) => {
             pushMedia(media, absoluteUrl(video.getAttribute("poster") || ""), "tweet-video-poster");
-          });
-          Array.from(mainArticle.querySelectorAll("img")).forEach((img) => {
-            pushMedia(media, bestImageUrl(img), img.getAttribute("alt") || "tweet-image");
           });
           media.forEach((item, index) => {
             if (!item.alt) item.alt = `tweet-image-${index + 1}`;
