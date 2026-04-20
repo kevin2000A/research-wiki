@@ -238,6 +238,31 @@ pub fn start_clip_server() {
                     }
                     let _ = request.respond(response);
                 }
+                (&Method::Post, "/tweet") => {
+                    let mut body = String::new();
+                    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+                        let err =
+                            format!(r#"{{"ok":false,"error":"Failed to read body: {}"}}"#, e);
+                        let mut response = Response::from_string(err).with_status_code(400);
+                        for h in &cors_headers {
+                            response.add_header(h.clone());
+                        }
+                        let _ = request.respond(response);
+                        continue;
+                    }
+
+                    let result = handle_tweet(&body);
+                    let status = if result.contains(r#""ok":true"#) {
+                        200
+                    } else {
+                        500
+                    };
+                    let mut response = Response::from_string(result).with_status_code(status);
+                    for h in &cors_headers {
+                        response.add_header(h.clone());
+                    }
+                    let _ = request.respond(response);
+                }
                 _ => {
                     let body = r#"{"ok":false,"error":"Not found"}"#;
                     let mut response = Response::from_string(body).with_status_code(404);
@@ -413,6 +438,147 @@ fn handle_clip(body: &str) -> String {
     format!(r#"{{"ok":true,"path":"{}"}}"#, relative_path)
 }
 
+fn handle_tweet(body: &str) -> String {
+    let parsed: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return format!(r#"{{"ok":false,"error":"Invalid JSON: {}"}}"#, e),
+    };
+
+    let project_path = match parsed["projectPath"].as_str() {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => return r#"{"ok":false,"error":"projectPath is required"}"#.to_string(),
+    };
+    let tweet = &parsed["tweet"];
+    let tweet_id = match tweet["tweetId"].as_str() {
+        Some(id) if !id.is_empty() => id,
+        _ => return r#"{"ok":false,"error":"tweet.tweetId is required"}"#.to_string(),
+    };
+    let url = tweet["url"].as_str().unwrap_or("");
+    let author_name = tweet["authorName"].as_str().unwrap_or("");
+    let author_handle = tweet["authorHandle"].as_str().unwrap_or("");
+    let created_at = tweet["createdAt"].as_str().unwrap_or("");
+    let text = tweet["text"].as_str().unwrap_or("").trim();
+
+    let dir_path = std::path::Path::new(&project_path).join("raw").join("sources");
+    if let Err(e) = std::fs::create_dir_all(&dir_path) {
+        return format!(
+            r#"{{"ok":false,"error":"Failed to create directory: {}"}}"#,
+            e
+        );
+    }
+
+    let handle_slug = sanitize_file_name(author_handle.trim_start_matches('@'));
+    let stem = if handle_slug.is_empty() {
+        format!("tweet-{}", sanitize_file_name(tweet_id))
+    } else {
+        format!("{}-{}", handle_slug, sanitize_file_name(tweet_id))
+    };
+    let file_path = unique_file_path(&dir_path, &format!("{}.md", stem));
+    let file_path_str = file_path.to_string_lossy().to_string();
+    let source_stem = file_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    let media_markdown = tweet["media"]
+        .as_array()
+        .map(|items| {
+            items.iter()
+                .filter_map(|item| item["url"].as_str())
+                .map(|media_url| format!("![tweet media]({})", media_url))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let quoted_tweet = &tweet["quotedTweet"];
+    let quoted_markdown = if quoted_tweet.is_object() {
+        let quoted_url = quoted_tweet["url"].as_str().unwrap_or("");
+        let quoted_author_name = quoted_tweet["authorName"].as_str().unwrap_or("");
+        let quoted_author_handle = quoted_tweet["authorHandle"].as_str().unwrap_or("");
+        let quoted_text = quoted_tweet["text"].as_str().unwrap_or("").trim();
+        if quoted_url.is_empty() && quoted_text.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n## Quoted Tweet\n\nAuthor: {} {}\n\nURL: {}\n\n{}\n",
+                quoted_author_name,
+                quoted_author_handle,
+                quoted_url,
+                quoted_text
+            )
+        }
+    } else {
+        String::new()
+    };
+
+    let mut content = format!(
+        "# Tweet\n\nSource: {}\n\nAuthor: {} {}\n\nCreated: {}\n\n## Content\n\n{}\n",
+        url,
+        author_name,
+        author_handle,
+        created_at,
+        text,
+    );
+    if !media_markdown.is_empty() {
+        content.push_str("\n## Media\n\n");
+        content.push_str(&media_markdown.join("\n\n"));
+        content.push('\n');
+    }
+    content.push_str(&quoted_markdown);
+
+    if let Some(assets) = parsed["assets"].as_array() {
+        match save_tweet_assets(&project_path, &source_stem, &content, assets) {
+            Ok(updated) => content = updated,
+            Err(e) => {
+                return format!(
+                    r#"{{"ok":false,"error":"Failed to save tweet assets: {}"}}"#,
+                    e
+                );
+            }
+        }
+    }
+
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let title = if author_name.is_empty() {
+        format!("Tweet {}", tweet_id)
+    } else {
+        format!("Tweet by {}", author_name)
+    };
+    let markdown = format!(
+        "---\ntype: twitter-post\ntitle: \"{}\"\ntweet_id: \"{}\"\nurl: \"{}\"\nauthor_name: \"{}\"\nauthor_handle: \"{}\"\ncreated_at: \"{}\"\nclipped: {}\norigin: twitter\nsources: []\ntags: [twitter, x, social]\n---\n\n{}",
+        yaml_escape(&title),
+        yaml_escape(tweet_id),
+        yaml_escape(url),
+        yaml_escape(author_name),
+        yaml_escape(author_handle),
+        yaml_escape(created_at),
+        date,
+        content,
+    );
+
+    if let Err(e) = std::fs::write(&file_path, markdown) {
+        return format!(
+            r#"{{"ok":false,"error":"Failed to write tweet file: {}"}}"#,
+            e
+        );
+    }
+
+    let relative_path = {
+        let base = std::path::Path::new(&project_path);
+        file_path
+            .strip_prefix(base)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| file_path_str.replace('\\', "/"))
+    };
+
+    if let Ok(mut pending) = PENDING_CLIPS.lock() {
+        pending.push((project_path, file_path_str, false));
+    }
+
+    format!(r#"{{"ok":true,"path":"{}"}}"#, relative_path)
+}
+
 fn save_clip_assets(
     project_path: &str,
     source_stem: &str,
@@ -461,6 +627,56 @@ fn save_clip_assets(
             asset_dir_name,
             saved_name
         );
+        updated = updated.replace(original_url, &relative);
+    }
+
+    Ok(updated)
+}
+
+fn save_tweet_assets(
+    project_path: &str,
+    source_stem: &str,
+    content: &str,
+    assets: &[serde_json::Value],
+) -> Result<String, String> {
+    if assets.is_empty() {
+        return Ok(content.to_string());
+    }
+
+    let asset_dir_name = sanitize_file_name(source_stem);
+    let asset_dir = std::path::Path::new(project_path)
+        .join("raw")
+        .join("assets")
+        .join("twitter")
+        .join(&asset_dir_name);
+    std::fs::create_dir_all(&asset_dir)
+        .map_err(|e| format!("Failed to create tweet asset directory: {}", e))?;
+
+    let mut updated = content.to_string();
+    for asset in assets {
+        let original_url = asset["originalUrl"]
+            .as_str()
+            .ok_or_else(|| "asset originalUrl is required".to_string())?;
+        let file_name = asset["fileName"]
+            .as_str()
+            .map(sanitize_file_name)
+            .ok_or_else(|| "asset fileName is required".to_string())?;
+        let data_base64 = asset["dataBase64"]
+            .as_str()
+            .ok_or_else(|| "asset dataBase64 is required".to_string())?;
+        let bytes = general_purpose::STANDARD
+            .decode(data_base64)
+            .map_err(|e| format!("Invalid asset base64 data: {}", e))?;
+
+        let saved_path = unique_file_path(&asset_dir, &file_name);
+        std::fs::write(&saved_path, bytes)
+            .map_err(|e| format!("Failed to write tweet asset: {}", e))?;
+
+        let saved_name = saved_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let relative = format!("../assets/twitter/{}/{}", asset_dir_name, saved_name);
         updated = updated.replace(original_url, &relative);
     }
 
