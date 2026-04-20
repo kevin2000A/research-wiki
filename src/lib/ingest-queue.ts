@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "@/commands/fs"
 import { autoIngest } from "./ingest"
 import { useWikiStore } from "@/stores/wiki-store"
-import { normalizePath } from "@/lib/path-utils"
+import { normalizePath, isAbsolutePath } from "@/lib/path-utils"
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -22,6 +22,12 @@ let processing = false
 let currentProjectPath = ""
 let currentAbortController: AbortController | null = null
 let lastWrittenFiles: string[] = []  // track files written by current ingest for cleanup
+// Track whether any task has been processed since the last drain.
+// Prevents the sweep from running on every idle/no-op call.
+let processedSinceDrain = false
+// Abort controller for the review-sweep LLM call so switching projects
+// cancels a long-running judgment instead of burning tokens.
+let sweepAbortController: AbortController | null = null
 
 // ── Persistence ───────────────────────────────────────────────────────────
 
@@ -149,7 +155,9 @@ export async function cancelTask(projectPath: string, taskId: string): Promise<v
       const { deleteFile } = await import("@/commands/fs")
       for (const filePath of lastWrittenFiles) {
         try {
-          const fullPath = filePath.startsWith("/") ? filePath : `${normalizePath(projectPath)}/${filePath}`
+          const fullPath = isAbsolutePath(filePath)
+            ? normalizePath(filePath)
+            : `${normalizePath(projectPath)}/${filePath}`
           await deleteFile(fullPath)
         } catch {
           // file may not exist
@@ -179,6 +187,48 @@ export async function clearCompletedTasks(projectPath: string): Promise<void> {
 }
 
 /**
+ * Cancel everything that's not finished: aborts the running task (if any),
+ * cleans up its partial output, and drops every pending + processing item.
+ *
+ * Failed tasks are retained so the user can still see / retry them.
+ * Returns the number of tasks removed from the queue.
+ */
+export async function cancelAllTasks(projectPath: string): Promise<number> {
+  const pp = normalizePath(projectPath)
+
+  // Abort any in-progress LLM call first so it stops burning tokens.
+  if (currentAbortController) {
+    currentAbortController.abort()
+    currentAbortController = null
+  }
+  processing = false
+
+  // Clean up partial files from the task that was processing, if any.
+  if (lastWrittenFiles.length > 0) {
+    const { deleteFile } = await import("@/commands/fs")
+    for (const filePath of lastWrittenFiles) {
+      try {
+        const fullPath = isAbsolutePath(filePath)
+          ? normalizePath(filePath)
+          : `${pp}/${filePath}`
+        await deleteFile(fullPath)
+      } catch {
+        // file may not exist
+      }
+    }
+    lastWrittenFiles = []
+  }
+
+  const before = queue.length
+  queue = queue.filter((t) => t.status === "failed")
+  const removed = before - queue.length
+
+  await saveQueue(pp)
+  console.log(`[Ingest Queue] Cancelled all: ${removed} tasks removed`)
+  return removed
+}
+
+/**
  * Get current queue state.
  */
 export function getQueue(): readonly IngestTask[] {
@@ -197,6 +247,28 @@ export function getQueueSummary(): { pending: number; processing: number; failed
   }
 }
 
+/**
+ * Clear all in-memory queue state without touching disk.
+ * Called when switching projects to prevent cross-project contamination.
+ */
+export function clearQueueState(): void {
+  // Abort any in-progress ingest
+  if (currentAbortController) {
+    currentAbortController.abort()
+  }
+  // Abort any in-progress review sweep LLM call
+  if (sweepAbortController) {
+    sweepAbortController.abort()
+  }
+  queue = []
+  processing = false
+  currentProjectPath = ""
+  currentAbortController = null
+  sweepAbortController = null
+  lastWrittenFiles = []
+  processedSinceDrain = false
+}
+
 // ── Restore on startup ───────────────────────────────────────────────────
 
 /**
@@ -205,7 +277,13 @@ export function getQueueSummary(): { pending: number; processing: number; failed
  */
 export async function restoreQueue(projectPath: string): Promise<void> {
   const pp = normalizePath(projectPath)
+  // Always reset in-memory state FIRST to prevent cross-project contamination
+  queue = []
+  processing = false
+  currentAbortController = null
+  lastWrittenFiles = []
   currentProjectPath = pp
+
   const saved = await loadQueue(pp)
 
   if (saved.length === 0) return
@@ -235,11 +313,36 @@ export async function restoreQueue(projectPath: string): Promise<void> {
 
 const MAX_RETRIES = 3
 
+async function onQueueDrained(projectPath: string): Promise<void> {
+  if (!processedSinceDrain) return
+  processedSinceDrain = false
+
+  sweepAbortController = new AbortController()
+  const signal = sweepAbortController.signal
+
+  try {
+    const { sweepResolvedReviews } = await import("@/lib/sweep-reviews")
+    await sweepResolvedReviews(projectPath, signal)
+  } catch (err) {
+    console.error("[Ingest Queue] Failed to load sweep-reviews:", err)
+  } finally {
+    if (sweepAbortController && sweepAbortController.signal === signal) {
+      sweepAbortController = null
+    }
+  }
+}
+
 async function processNext(projectPath: string): Promise<void> {
   if (processing) return
 
   const next = queue.find((t) => t.status === "pending")
-  if (!next) return
+  if (!next) {
+    // Queue drained — trigger review cleanup (auto-resolve stale items)
+    onQueueDrained(projectPath).catch((err) =>
+      console.error("[Ingest Queue] sweep failed:", err)
+    )
+    return
+  }
 
   processing = true
   next.status = "processing"
@@ -258,8 +361,8 @@ async function processNext(projectPath: string): Promise<void> {
     return
   }
 
-  const fullSourcePath = next.sourcePath.startsWith("/")
-    ? next.sourcePath
+  const fullSourcePath = isAbsolutePath(next.sourcePath)
+    ? normalizePath(next.sourcePath)
     : `${pp}/${next.sourcePath}`
 
   console.log(`[Ingest Queue] Processing: ${next.sourcePath} (${queue.filter((t) => t.status === "pending").length} remaining)`)
@@ -276,6 +379,7 @@ async function processNext(projectPath: string): Promise<void> {
     currentAbortController = null
     lastWrittenFiles = []
     queue = queue.filter((t) => t.id !== next.id)
+    processedSinceDrain = true
     await saveQueue(pp)
 
     console.log(`[Ingest Queue] Done: ${next.sourcePath}`)

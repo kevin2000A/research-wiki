@@ -5,6 +5,8 @@ use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::panic_guard::run_guarded_async;
+
 /// Result from vector search
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct VectorSearchResult {
@@ -66,46 +68,49 @@ pub async fn vector_upsert(
     page_id: String,
     embedding: Vec<f32>,
 ) -> Result<(), String> {
-    validate_page_id(&page_id)?;
+    run_guarded_async("vector_upsert", async move {
+        validate_page_id(&page_id)?;
 
-    let db = connect(&db_path(&project_path))
-        .execute()
-        .await
-        .map_err(|e| format!("DB connect error: {e}"))?;
-
-    let dim = embedding.len() as i32;
-    let schema = make_schema(dim);
-    let batch = make_batch(schema.clone(), &page_id, embedding, dim)?;
-    let data = vec![batch];
-
-    let tables = db.table_names()
-        .execute()
-        .await
-        .map_err(|e| format!("List tables error: {e}"))?;
-
-    if tables.contains(&TABLE_NAME.to_string()) {
-        let table = db.open_table(TABLE_NAME)
+        let db = connect(&db_path(&project_path))
             .execute()
             .await
-            .map_err(|e| format!("Open table error: {e}"))?;
+            .map_err(|e| format!("DB connect error: {e}"))?;
 
-        // Delete existing entry then add new one
-        if let Err(e) = table.delete(&format!("page_id = '{}'", page_id)).await {
-            eprintln!("[vectorstore] Warning: delete before upsert failed for '{}': {}", page_id, e);
+        let dim = embedding.len() as i32;
+        let schema = make_schema(dim);
+        let batch = make_batch(schema.clone(), &page_id, embedding, dim)?;
+        let data = vec![batch];
+
+        let tables = db.table_names()
+            .execute()
+            .await
+            .map_err(|e| format!("List tables error: {e}"))?;
+
+        if tables.contains(&TABLE_NAME.to_string()) {
+            let table = db.open_table(TABLE_NAME)
+                .execute()
+                .await
+                .map_err(|e| format!("Open table error: {e}"))?;
+
+            // Delete existing entry then add new one
+            if let Err(e) = table.delete(&format!("page_id = '{}'", page_id)).await {
+                eprintln!("[vectorstore] Warning: delete before upsert failed for '{}': {}", page_id, e);
+            }
+
+            table.add(data)
+                .execute()
+                .await
+                .map_err(|e| format!("Add error: {e}"))?;
+        } else {
+            db.create_table(TABLE_NAME, data)
+                .execute()
+                .await
+                .map_err(|e| format!("Create table error: {e}"))?;
         }
 
-        table.add(data)
-            .execute()
-            .await
-            .map_err(|e| format!("Add error: {e}"))?;
-    } else {
-        db.create_table(TABLE_NAME, data)
-            .execute()
-            .await
-            .map_err(|e| format!("Create table error: {e}"))?;
-    }
-
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 /// Search for similar pages by embedding vector
@@ -115,61 +120,64 @@ pub async fn vector_search(
     query_embedding: Vec<f32>,
     top_k: usize,
 ) -> Result<Vec<VectorSearchResult>, String> {
-    let db = connect(&db_path(&project_path))
-        .execute()
-        .await
-        .map_err(|e| format!("DB connect error: {e}"))?;
+    run_guarded_async("vector_search", async move {
+        let db = connect(&db_path(&project_path))
+            .execute()
+            .await
+            .map_err(|e| format!("DB connect error: {e}"))?;
 
-    let tables = db.table_names()
-        .execute()
-        .await
-        .map_err(|e| format!("List tables error: {e}"))?;
+        let tables = db.table_names()
+            .execute()
+            .await
+            .map_err(|e| format!("List tables error: {e}"))?;
 
-    if !tables.contains(&TABLE_NAME.to_string()) {
-        return Ok(vec![]);
-    }
-
-    let table = db.open_table(TABLE_NAME)
-        .execute()
-        .await
-        .map_err(|e| format!("Open table error: {e}"))?;
-
-    let results_stream = table
-        .vector_search(query_embedding)
-        .map_err(|e| format!("Search error: {e}"))?
-        .limit(top_k)
-        .execute()
-        .await
-        .map_err(|e| format!("Execute search error: {e}"))?;
-
-    let mut search_results = Vec::new();
-
-    use futures::TryStreamExt;
-    let batches: Vec<RecordBatch> = results_stream
-        .try_collect()
-        .await
-        .map_err(|e| format!("Collect error: {e}"))?;
-
-    for batch in &batches {
-        let ids = batch
-            .column_by_name("page_id")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-            .ok_or("Missing page_id column")?;
-
-        let distances = batch
-            .column_by_name("_distance")
-            .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-            .ok_or("Missing _distance column")?;
-
-        for i in 0..batch.num_rows() {
-            let page_id = ids.value(i).to_string();
-            let distance = distances.value(i);
-            let score = 1.0 / (1.0 + distance);
-            search_results.push(VectorSearchResult { page_id, score });
+        if !tables.contains(&TABLE_NAME.to_string()) {
+            return Ok(vec![]);
         }
-    }
 
-    Ok(search_results)
+        let table = db.open_table(TABLE_NAME)
+            .execute()
+            .await
+            .map_err(|e| format!("Open table error: {e}"))?;
+
+        let results_stream = table
+            .vector_search(query_embedding)
+            .map_err(|e| format!("Search error: {e}"))?
+            .limit(top_k)
+            .execute()
+            .await
+            .map_err(|e| format!("Execute search error: {e}"))?;
+
+        let mut search_results = Vec::new();
+
+        use futures::TryStreamExt;
+        let batches: Vec<RecordBatch> = results_stream
+            .try_collect()
+            .await
+            .map_err(|e| format!("Collect error: {e}"))?;
+
+        for batch in &batches {
+            let ids = batch
+                .column_by_name("page_id")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or("Missing page_id column")?;
+
+            let distances = batch
+                .column_by_name("_distance")
+                .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+                .ok_or("Missing _distance column")?;
+
+            for i in 0..batch.num_rows() {
+                let page_id = ids.value(i).to_string();
+                let distance = distances.value(i);
+                let score = 1.0 / (1.0 + distance);
+                search_results.push(VectorSearchResult { page_id, score });
+            }
+        }
+
+        Ok(search_results)
+    })
+    .await
 }
 
 /// Delete a page from the vector index
@@ -178,32 +186,35 @@ pub async fn vector_delete(
     project_path: String,
     page_id: String,
 ) -> Result<(), String> {
-    validate_page_id(&page_id)?;
+    run_guarded_async("vector_delete", async move {
+        validate_page_id(&page_id)?;
 
-    let db = connect(&db_path(&project_path))
-        .execute()
-        .await
-        .map_err(|e| format!("DB connect error: {e}"))?;
+        let db = connect(&db_path(&project_path))
+            .execute()
+            .await
+            .map_err(|e| format!("DB connect error: {e}"))?;
 
-    let tables = db.table_names()
-        .execute()
-        .await
-        .map_err(|e| format!("List tables error: {e}"))?;
+        let tables = db.table_names()
+            .execute()
+            .await
+            .map_err(|e| format!("List tables error: {e}"))?;
 
-    if !tables.contains(&TABLE_NAME.to_string()) {
-        return Ok(());
-    }
+        if !tables.contains(&TABLE_NAME.to_string()) {
+            return Ok(());
+        }
 
-    let table = db.open_table(TABLE_NAME)
-        .execute()
-        .await
-        .map_err(|e| format!("Open table error: {e}"))?;
+        let table = db.open_table(TABLE_NAME)
+            .execute()
+            .await
+            .map_err(|e| format!("Open table error: {e}"))?;
 
-    table.delete(&format!("page_id = '{}'", page_id))
-        .await
-        .map_err(|e| format!("Delete error: {e}"))?;
+        table.delete(&format!("page_id = '{}'", page_id))
+            .await
+            .map_err(|e| format!("Delete error: {e}"))?;
 
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 /// Get count of indexed vectors
@@ -211,28 +222,31 @@ pub async fn vector_delete(
 pub async fn vector_count(
     project_path: String,
 ) -> Result<usize, String> {
-    let db = connect(&db_path(&project_path))
-        .execute()
-        .await
-        .map_err(|e| format!("DB connect error: {e}"))?;
+    run_guarded_async("vector_count", async move {
+        let db = connect(&db_path(&project_path))
+            .execute()
+            .await
+            .map_err(|e| format!("DB connect error: {e}"))?;
 
-    let tables = db.table_names()
-        .execute()
-        .await
-        .map_err(|e| format!("List tables error: {e}"))?;
+        let tables = db.table_names()
+            .execute()
+            .await
+            .map_err(|e| format!("List tables error: {e}"))?;
 
-    if !tables.contains(&TABLE_NAME.to_string()) {
-        return Ok(0);
-    }
+        if !tables.contains(&TABLE_NAME.to_string()) {
+            return Ok(0);
+        }
 
-    let table = db.open_table(TABLE_NAME)
-        .execute()
-        .await
-        .map_err(|e| format!("Open table error: {e}"))?;
+        let table = db.open_table(TABLE_NAME)
+            .execute()
+            .await
+            .map_err(|e| format!("Open table error: {e}"))?;
 
-    let count = table.count_rows(None)
-        .await
-        .map_err(|e| format!("Count error: {e}"))?;
+        let count = table.count_rows(None)
+            .await
+            .map_err(|e| format!("Count error: {e}"))?;
 
-    Ok(count)
+        Ok(count)
+    })
+    .await
 }

@@ -1,13 +1,14 @@
 {
   "name": "llm-wiki",
   "private": true,
-  "version": "0.3.1",
+  "version": "0.3.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "vitest run --exclude='**/*.real-llm.test.ts'",
+    "test:llm": "RUN_LLM_TESTS=1 vitest run real-llm --no-file-parallelism --reporter=verbose",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -51,6 +52,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^6.0.1",
+    "fast-check": "^4.7.0",
     "typescript": "^5.7.3",
     "vite": "^8.0.0",
     "vitest": "^4.1.4"

@@ -22,6 +22,34 @@ interface EmbeddingConfig {
   model: string // e.g. "text-embedding-qwen3-embedding-0.6b"
 }
 
+/**
+ * Output language for LLM-generated content (wiki pages, chat responses, research).
+ * "auto" = detect from user input / source document language.
+ * Otherwise = force all LLM output to use the specified language.
+ */
+type OutputLanguage =
+  | "auto"
+  | "English"
+  | "Chinese"
+  | "Traditional Chinese"
+  | "Japanese"
+  | "Korean"
+  | "Vietnamese"
+  | "French"
+  | "German"
+  | "Spanish"
+  | "Portuguese"
+  | "Italian"
+  | "Russian"
+  | "Arabic"
+  | "Hindi"
+  | "Turkish"
+  | "Dutch"
+  | "Polish"
+  | "Swedish"
+  | "Indonesian"
+  | "Thai"
+
 interface WikiState {
   project: WikiProject | null
   fileTree: FileNode[]
@@ -32,6 +60,7 @@ interface WikiState {
   llmConfig: LlmConfig
   searchApiConfig: SearchApiConfig
   embeddingConfig: EmbeddingConfig
+  outputLanguage: OutputLanguage
   dataVersion: number
 
   setProject: (project: WikiProject | null) => void
@@ -43,6 +72,7 @@ interface WikiState {
   setLlmConfig: (config: LlmConfig) => void
   setSearchApiConfig: (config: SearchApiConfig) => void
   setEmbeddingConfig: (config: EmbeddingConfig) => void
+  setOutputLanguage: (lang: OutputLanguage) => void
   bumpDataVersion: () => void
 }
 
@@ -82,10 +112,13 @@ export const useWikiStore = create<WikiState>((set) => ({
     model: "",
   },
 
+  outputLanguage: "auto",
+
   setLlmConfig: (llmConfig) => set({ llmConfig }),
   setSearchApiConfig: (searchApiConfig) => set({ searchApiConfig }),
   setEmbeddingConfig: (embeddingConfig) => set({ embeddingConfig }),
+  setOutputLanguage: (outputLanguage) => set({ outputLanguage }),
   bumpDataVersion: () => set((state) => ({ dataVersion: state.dataVersion + 1 })),
 }))
 
-export type { WikiState, LlmConfig, SearchApiConfig, EmbeddingConfig }
+export type { WikiState, LlmConfig, SearchApiConfig, EmbeddingConfig, OutputLanguage }

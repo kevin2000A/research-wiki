@@ -5,6 +5,7 @@ import { writeFile, readFile, listDirectory } from "@/commands/fs"
 import { useWikiStore, type LlmConfig, type SearchApiConfig } from "@/stores/wiki-store"
 import { useResearchStore } from "@/stores/research-store"
 import { normalizePath } from "@/lib/path-utils"
+import { buildLanguageDirective } from "@/lib/output-language"
 
 let processing = false
 
@@ -115,8 +116,7 @@ async function executeResearch(
     const systemPrompt = [
       "You are a research assistant. Synthesize the web search results into a comprehensive wiki page.",
       "",
-      "## Language Rule",
-      "- ALWAYS match the language of the research topic. If the topic is in Chinese, write in Chinese. If in English, write in English.",
+      buildLanguageDirective(topic),
       "",
       "## Cross-referencing (IMPORTANT)",
       "- The wiki already has existing pages listed in the Wiki Index below.",

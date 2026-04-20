@@ -106,7 +106,13 @@ pub fn start_clip_server() {
                 }
                 (&Method::Get, "/project") => {
                     let path = CURRENT_PROJECT.lock().unwrap().clone();
-                    let body = format!(r#"{{"ok":true,"path":"{}"}}"#, path);
+                    // serde_json handles backslash escaping so a Windows
+                    // path that somehow still contains `\` won't break
+                    // the JSON parser on the client.
+                    let body = serde_json::json!({
+                        "ok": true,
+                        "path": path,
+                    }).to_string();
                     let mut response = Response::from_string(body);
                     for h in &cors_headers {
                         response.add_header(h.clone());
@@ -141,13 +147,21 @@ pub fn start_clip_server() {
                 (&Method::Get, "/projects") => {
                     let projects = ALL_PROJECTS.lock().unwrap().clone();
                     let current = CURRENT_PROJECT.lock().unwrap().clone();
-                    let items: Vec<String> = projects.iter()
-                        .map(|(name, path)| format!(r#"{{"name":"{}","path":"{}","current":{}}}"#,
-                            name.replace('"', r#"\""#),
-                            path.replace('"', r#"\""#),
-                            path == &current))
+                    // serde_json for proper escaping of `\`, `"`, and any
+                    // other characters that might appear in a project name
+                    // or path. Previously only `"` was escaped by hand,
+                    // which broke on Windows paths containing backslashes.
+                    let items: Vec<serde_json::Value> = projects.iter()
+                        .map(|(name, path)| serde_json::json!({
+                            "name": name,
+                            "path": path,
+                            "current": path == &current,
+                        }))
                         .collect();
-                    let body = format!(r#"{{"ok":true,"projects":[{}]}}"#, items.join(","));
+                    let body = serde_json::json!({
+                        "ok": true,
+                        "projects": items,
+                    }).to_string();
                     let mut response = Response::from_string(body);
                     for h in &cors_headers { response.add_header(h.clone()); }
                     let _ = request.respond(response);
@@ -175,14 +189,17 @@ pub fn start_clip_server() {
                 }
                 (&Method::Get, "/clips/pending") => {
                     let mut pending = PENDING_CLIPS.lock().unwrap();
-                    let items: Vec<String> = pending.iter()
+                    let clips_json: Vec<serde_json::Value> = pending.iter()
                         .map(|(proj, file, auto_ingest)| serde_json::json!({
                             "projectPath": proj,
                             "filePath": file,
                             "autoIngest": auto_ingest,
-                        }).to_string())
+                        }))
                         .collect();
-                    let body = format!(r#"{{"ok":true,"clips":[{}]}}"#, items.join(","));
+                    let body = serde_json::json!({
+                        "ok": true,
+                        "clips": clips_json,
+                    }).to_string();
                     pending.clear();
                     let mut response = Response::from_string(body);
                     for h in &cors_headers { response.add_header(h.clone()); }
@@ -302,7 +319,9 @@ fn handle_set_project(body: &str) -> String {
     };
 
     let path = match parsed["path"].as_str() {
-        Some(p) => p.to_string(),
+        // Normalize to forward slashes on ingress so downstream
+        // comparisons against frontend-normalized paths succeed.
+        Some(p) => p.replace('\\', "/"),
         None => return r#"{"ok":false,"error":"path field is required"}"#.to_string(),
     };
 
@@ -335,6 +354,9 @@ fn handle_clip(body: &str) -> String {
     } else {
         project_path_from_body
     };
+    // Normalize to forward slashes so string comparisons against the
+    // frontend-side project path (already normalized) succeed on Windows.
+    let project_path = project_path.replace('\\', "/");
 
     if project_path.is_empty() {
         return r#"{"ok":false,"error":"projectPath is required (set via POST /project or include in request body)"}"#
@@ -384,12 +406,12 @@ fn handle_clip(body: &str) -> String {
         file_path = dir_path.join(format!("{}-{}.md", base_name, counter));
         counter += 1;
     }
-    let file_path = file_path.to_string_lossy().to_string();
-    let source_stem = std::path::Path::new(&file_path)
+    let source_stem = file_path
         .file_stem()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
+    let file_path_str = file_path.to_string_lossy().replace('\\', "/");
 
     if let Some(assets) = parsed["assets"].as_array() {
         match save_clip_assets(&project_path, &source_stem, &content, assets) {
@@ -423,19 +445,22 @@ fn handle_clip(body: &str) -> String {
 
     // Compute relative path using Path for cross-platform separator handling
     let relative_path = {
-        let full = std::path::Path::new(&file_path);
+        let full = &file_path;
         let base = std::path::Path::new(&project_path);
         full.strip_prefix(base)
             .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|_| file_path.replace('\\', "/"))
+            .unwrap_or_else(|_| file_path_str.clone())
     };
 
     // Add to pending clips so frontend refreshes raw sources. Ingest is queued manually.
     if let Ok(mut pending) = PENDING_CLIPS.lock() {
-        pending.push((project_path, file_path.clone(), false));
+        pending.push((project_path, file_path_str.clone(), false));
     }
 
-    format!(r#"{{"ok":true,"path":"{}"}}"#, relative_path)
+    serde_json::json!({
+        "ok": true,
+        "path": relative_path,
+    }).to_string()
 }
 
 fn handle_tweet(body: &str) -> String {
@@ -445,7 +470,7 @@ fn handle_tweet(body: &str) -> String {
     };
 
     let project_path = match parsed["projectPath"].as_str() {
-        Some(p) if !p.is_empty() => p.to_string(),
+        Some(p) if !p.is_empty() => p.replace('\\', "/"),
         _ => return r#"{"ok":false,"error":"projectPath is required"}"#.to_string(),
     };
     let tweet = &parsed["tweet"];
@@ -474,7 +499,7 @@ fn handle_tweet(body: &str) -> String {
         format!("{}-{}", handle_slug, sanitize_file_name(tweet_id))
     };
     let file_path = unique_file_path(&dir_path, &format!("{}.md", stem));
-    let file_path_str = file_path.to_string_lossy().to_string();
+    let file_path_str = file_path.to_string_lossy().replace('\\', "/");
     let source_stem = file_path
         .file_stem()
         .unwrap_or_default()
@@ -690,7 +715,7 @@ fn handle_paper(body: &str) -> String {
     };
 
     let project_path = match parsed["projectPath"].as_str() {
-        Some(p) if !p.is_empty() => p.to_string(),
+        Some(p) if !p.is_empty() => p.replace('\\', "/"),
         _ => return r#"{"ok":false,"error":"projectPath is required"}"#.to_string(),
     };
     let arxiv_id = match parsed["arxivId"].as_str() {
@@ -760,7 +785,7 @@ fn handle_paper(body: &str) -> String {
         };
 
         let paper_path = unique_file_path(&dir_path, &format!("{}-paper.md", stem));
-        let paper_path_str = paper_path.to_string_lossy().to_string();
+        let paper_path_str = paper_path.to_string_lossy().replace('\\', "/");
         let paper_relative_path = {
             let base = std::path::Path::new(&project_path);
             paper_path
@@ -821,7 +846,7 @@ fn handle_paper(body: &str) -> String {
         );
     }
 
-    let file_path_str = file_path.to_string_lossy().to_string();
+    let file_path_str = file_path.to_string_lossy().replace('\\', "/");
     let relative_path = {
         let base = std::path::Path::new(&project_path);
         file_path
@@ -870,7 +895,7 @@ fn handle_paper(body: &str) -> String {
     };
 
     let paper_path = unique_file_path(&dir_path, &format!("{}-paper.md", stem));
-    let paper_path_str = paper_path.to_string_lossy().to_string();
+        let paper_path_str = paper_path.to_string_lossy().replace('\\', "/");
     let paper_relative_path = {
         let base = std::path::Path::new(&project_path);
         paper_path

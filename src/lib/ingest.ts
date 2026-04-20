@@ -7,10 +7,21 @@ import { useActivityStore } from "@/stores/activity-store"
 import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { getFileName, normalizePath } from "@/lib/path-utils"
 import { checkIngestCache, saveIngestCache } from "@/lib/ingest-cache"
+import { buildLanguageDirective } from "@/lib/output-language"
+import { detectLanguage } from "@/lib/detect-language"
 
-const FILE_BLOCK_REGEX = /---FILE:\s*([^\n-]+?)\s*---\n([\s\S]*?)---END FILE---/g
+// Path capture group allows any non-newline char so hyphenated paths like
+// "wiki/concepts/multi-head-attention.md" are accepted. The lazy `+?` plus
+// the following `\s*---\n` anchor still stops at the closing ---.
+const FILE_BLOCK_REGEX = /---FILE:\s*([^\n]+?)\s*---\n([\s\S]*?)---END FILE---/g
 
-export const LANGUAGE_RULE = "## Language Rule\n- ALWAYS match the language of the source document. If the source is in Chinese, write in Chinese. If in English, write in English. Wiki page titles, content, and descriptions should all be in the same language as the source material."
+/**
+ * Build the language rule for ingest prompts.
+ * Uses the user's configured output language, falling back to source content detection.
+ */
+export function languageRule(sourceContent: string = ""): string {
+  return buildLanguageDirective(sourceContent)
+}
 
 const ARXIV_PAPER_ANALYSIS_RULE = [
   "## arXiv Paper Rule",
@@ -87,7 +98,7 @@ export async function autoIngest(
   await streamChat(
     llmConfig,
     [
-      { role: "system", content: buildAnalysisPrompt(purpose, index, arxivPaper) },
+      { role: "system", content: buildAnalysisPrompt(purpose, index, truncatedContent, arxivPaper) },
       { role: "user", content: `Analyze this source document:\n\n**File:** ${fileName}${folderContext ? `\n**Folder context:** ${folderContext}` : ""}\n\n---\n\n${truncatedContent}` },
     ],
     {
@@ -98,6 +109,7 @@ export async function autoIngest(
       },
     },
     signal,
+    { temperature: 0.1 },
   )
 
   if (useActivityStore.getState().items.find((i) => i.id === activityId)?.status === "error") {
@@ -113,19 +125,29 @@ export async function autoIngest(
   await streamChat(
     llmConfig,
     [
-      { role: "system", content: buildGenerationPrompt(schema, purpose, index, fileName, overview, currentDate, arxivPaper) },
+      { role: "system", content: buildGenerationPrompt(schema, purpose, index, fileName, overview, truncatedContent, currentDate, arxivPaper) },
       {
         role: "user",
         content: [
-          `Based on the following analysis of **${fileName}**, generate the wiki files.`,
+          `Source document to process: **${fileName}**`,
           "",
-          "## Source Analysis",
+          "The Stage 1 analysis below is CONTEXT to inform your output. Do NOT echo",
+          "its tables, bullet points, or prose. Your output must be FILE/REVIEW",
+          "blocks as specified in the system prompt — nothing else.",
+          "",
+          "## Stage 1 Analysis (context only — do not repeat)",
           "",
           analysis,
           "",
           "## Original Source Content",
           "",
           truncatedContent,
+          "",
+          "---",
+          "",
+          `Now emit the FILE blocks for the wiki files derived from **${fileName}**.`,
+          "Your response MUST begin with `---FILE:` as the very first characters.",
+          "No preamble. No analysis prose. Start immediately.",
         ].join("\n"),
       },
     ],
@@ -137,6 +159,7 @@ export async function autoIngest(
       },
     },
     signal,
+    { temperature: 0.1 },
   )
 
   if (useActivityStore.getState().items.find((i) => i.id === activityId)?.status === "error") {
@@ -235,14 +258,79 @@ export async function autoIngest(
   return writtenPaths
 }
 
-async function writeFileBlocks(projectPath: string, text: string, currentDate: string): Promise<string[]> {
+/**
+ * Per-file language guard. Strips frontmatter + code/math blocks, runs
+ * detectLanguage on the remainder, and returns whether the content is in
+ * a language family compatible with the target. This catches cases where
+ * the LLM follows the format spec but writes a single page in a wrong
+ * language (observed ~once in 5 real-LLM runs on MiniMax-M2.7-highspeed).
+ */
+function contentMatchesTargetLanguage(content: string, target: string): boolean {
+  // Strip frontmatter
+  const fmEnd = content.indexOf("\n---\n", 3)
+  let body = fmEnd > 0 ? content.slice(fmEnd + 5) : content
+  // Strip code + math
+  body = body
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/\$\$[\s\S]*?\$\$/g, "")
+    .replace(/\$[^$\n]*\$/g, "")
+  const sample = body.slice(0, 1500)
+  if (sample.trim().length < 20) return true // too short to judge
+
+  const detected = detectLanguage(sample)
+
+  // Compatible families: CJK targets accept CJK variants; Latin targets
+  // accept any Latin family (English may mis-detect as Italian/French for
+  // short idiomatic samples — that's fine). Cross-family is the real bug.
+  const cjk = new Set(["Chinese", "Traditional Chinese", "Japanese", "Korean"])
+  const targetIsCjk = cjk.has(target)
+  const detectedIsCjk = cjk.has(detected)
+  if (targetIsCjk) return detectedIsCjk
+  return !detectedIsCjk && !["Arabic", "Hindi", "Thai", "Hebrew"].includes(detected)
+}
+
+async function writeFileBlocks(
+  projectPath: string,
+  text: string,
+  currentDate: string = new Date().toISOString().slice(0, 10),
+): Promise<string[]> {
   const writtenPaths: string[] = []
   const matches = text.matchAll(FILE_BLOCK_REGEX)
+
+  const targetLang = useWikiStore.getState().outputLanguage
 
   for (const match of matches) {
     const relativePath = match[1].trim()
     const content = match[2]
     if (!relativePath) continue
+
+    // Language guard: reject individual FILE blocks whose body contradicts
+    // the user-set target language. Skip:
+    // - log.md (structural, short)
+    // - /sources/ and /entities/ pages: these legitimately cite cross-
+    //   language proper nouns (a German philosophy source summary naturally
+    //   quotes Russian philosophers) which confuses naive script-based
+    //   detection. Keep the check for /concepts/ pages, which should be
+    //   authoritative content in the target language.
+    const isLog =
+      relativePath.endsWith("/log.md") || relativePath === "wiki/log.md"
+    const isEntityOrSource =
+      relativePath.startsWith("wiki/entities/") ||
+      relativePath.includes("/entities/") ||
+      relativePath.startsWith("wiki/sources/") ||
+      relativePath.includes("/sources/")
+    if (
+      targetLang &&
+      targetLang !== "auto" &&
+      !isLog &&
+      !isEntityOrSource &&
+      !contentMatchesTargetLanguage(content, targetLang)
+    ) {
+      console.warn(
+        `[ingest] dropping ${relativePath}: content not in target language ${targetLang}`,
+      )
+      continue
+    }
 
     const fullPath = `${projectPath}/${relativePath}`
     try {
@@ -343,11 +431,16 @@ function parseReviewBlocks(
  * Step 1 prompt: AI reads the source and produces a structured analysis.
  * This is the "discussion" step — the AI reasons about the source before writing wiki pages.
  */
-function buildAnalysisPrompt(purpose: string, index: string, arxivPaper = false): string {
+export function buildAnalysisPrompt(
+  purpose: string,
+  index: string,
+  sourceContent: string = "",
+  arxivPaper = false,
+): string {
   return [
     "You are an expert research analyst. Read the source document and produce a structured analysis.",
     "",
-    LANGUAGE_RULE,
+    languageRule(sourceContent),
     "",
     arxivPaper ? ARXIV_PAPER_ANALYSIS_RULE : "",
     arxivPaper ? "" : "",
@@ -395,14 +488,23 @@ function buildAnalysisPrompt(purpose: string, index: string, arxivPaper = false)
 /**
  * Step 2 prompt: AI takes its own analysis and generates wiki files + review items.
  */
-function buildGenerationPrompt(schema: string, purpose: string, index: string, sourceFileName: string, overview: string | undefined, currentDate: string, arxivPaper = false): string {
+export function buildGenerationPrompt(
+  schema: string,
+  purpose: string,
+  index: string,
+  sourceFileName: string,
+  overview?: string,
+  sourceContent: string = "",
+  currentDate: string = new Date().toISOString().slice(0, 10),
+  arxivPaper = false,
+): string {
   // Use original filename (without extension) as the source summary page name
   const sourceBaseName = sourceFileName.replace(/\.[^.]+$/, "")
 
   return [
     "You are a wiki maintainer. Based on the analysis provided, generate wiki files.",
     "",
-    LANGUAGE_RULE,
+    languageRule(sourceContent),
     "",
     arxivPaper ? ARXIV_PAPER_GENERATION_RULE : "",
     arxivPaper ? "" : "",
@@ -411,15 +513,8 @@ function buildGenerationPrompt(schema: string, purpose: string, index: string, s
     `All wiki pages generated from this source MUST include this filename in their frontmatter \`sources\` field.`,
     `Current date for all created/updated fields and wiki/log.md entries: **${currentDate}**.`,
     "",
-    "## Output Format",
+    "## What to generate",
     "",
-    "Output each wiki file in this exact format:",
-    "",
-    "---FILE: wiki/sources/filename.md---",
-    "(complete file content with YAML frontmatter)",
-    "---END FILE---",
-    "",
-    "Generate:",
     `1. A source summary page at **wiki/sources/${sourceBaseName}.md** (MUST use this exact path)`,
     "2. Entity pages in wiki/entities/ for key entities identified in the analysis",
     "3. Concept pages in wiki/concepts/ for key concepts identified in the analysis",
@@ -450,26 +545,18 @@ function buildGenerationPrompt(schema: string, purpose: string, index: string, s
     "- Follow the analysis recommendations on what to emphasize",
     "- If the analysis found connections to existing pages, add cross-references",
     "",
-    "## Review Items",
+    "## Review block types",
     "",
-    "After the FILE blocks, output REVIEW blocks for anything that needs human judgment:",
+    "After all FILE blocks, optionally emit REVIEW blocks for anything that needs human judgment:",
     "",
-    "---REVIEW: type | Title---",
-    "Description of what needs the user's attention.",
-    "OPTIONS: (see allowed options below)",
-    "PAGES: wiki/page1.md, wiki/page2.md",
-    "SEARCH: search query 1 | search query 2 | search query 3",
-    "---END REVIEW---",
-    "",
-    "Review types and when to use:",
     "- contradiction: the analysis found conflicts with existing wiki content",
     "- duplicate: an entity/concept might already exist under a different name in the index",
     "- missing-page: an important concept is referenced but has no dedicated page",
     "- suggestion: ideas for further research, related sources to look for, or connections worth exploring",
     "",
-    "## OPTIONS Rules (CRITICAL — only use these predefined options):",
+    "Only create reviews for things that genuinely need human input. Don't create trivial reviews.",
     "",
-    "For each review type, use ONLY these allowed OPTIONS:",
+    "## OPTIONS allowed values (only these predefined labels):",
     "",
     "- contradiction: OPTIONS: Create Page | Skip",
     "- duplicate: OPTIONS: Create Page | Skip",
@@ -479,18 +566,55 @@ function buildGenerationPrompt(schema: string, purpose: string, index: string, s
     "The user also has a 'Deep Research' button (auto-added by the system) that triggers web search.",
     "Do NOT invent custom option labels. Only use 'Create Page' and 'Skip'.",
     "",
-    "IMPORTANT for suggestion and missing-page types:",
-    "- The SEARCH field must contain 2-3 web search queries optimized for finding relevant papers, articles, or documentation.",
-    "- These should be specific, keyword-rich queries suitable for a search engine — NOT titles or sentences.",
-    "- Example: for a suggestion about 'automated debt detection in AI-generated code', good SEARCH queries would be:",
+    "For suggestion and missing-page reviews, the SEARCH field must contain 2-3 web search queries",
+    "(keyword-rich, specific, suitable for a search engine — NOT titles or sentences). Example:",
     "  SEARCH: automated technical debt detection AI generated code | software quality metrics LLM code generation | static analysis tools agentic software development",
-    "",
-    "Only create reviews for things that genuinely need human input. Don't create trivial reviews.",
     "",
     purpose ? `## Wiki Purpose\n${purpose}` : "",
     schema ? `## Wiki Schema\n${schema}` : "",
     index ? `## Current Wiki Index (preserve all existing entries, add new ones)\n${index}` : "",
     overview ? `## Current Overview (update this to reflect the new source)\n${overview}` : "",
+    "",
+    // ── OUTPUT FORMAT MUST BE THE LAST SECTION — models weight recent instructions highest ──
+    "## Output Format (MUST FOLLOW EXACTLY — this is how the parser reads your response)",
+    "",
+    "Your ENTIRE response consists of FILE blocks followed by optional REVIEW blocks. Nothing else.",
+    "",
+    "FILE block template:",
+    "```",
+    "---FILE: wiki/path/to/page.md---",
+    "(complete file content with YAML frontmatter)",
+    "---END FILE---",
+    "```",
+    "",
+    "REVIEW block template (optional, after all FILE blocks):",
+    "```",
+    "---REVIEW: type | Title---",
+    "Description of what needs the user's attention.",
+    "OPTIONS: Create Page | Skip",
+    "PAGES: wiki/page1.md, wiki/page2.md",
+    "SEARCH: query 1 | query 2 | query 3",
+    "---END REVIEW---",
+    "```",
+    "",
+    "## Output Requirements (STRICT — deviations will cause parse failure)",
+    "",
+    "1. The FIRST character of your response MUST be `-` (the opening of `---FILE:`).",
+    "2. DO NOT output any preamble such as \"Here are the files:\", \"Based on the analysis...\", or any introductory prose.",
+    "3. DO NOT echo or restate the analysis — that was stage 1's job. Your job is to emit FILE blocks.",
+    "4. DO NOT output markdown tables, bullet lists, or headings outside of FILE/REVIEW blocks.",
+    "5. DO NOT output any trailing commentary after the last `---END FILE---` or `---END REVIEW---`.",
+    "6. Between blocks, use only blank lines — no prose.",
+    "7. EVERY FILE block's content (titles, body, descriptions) MUST be in the mandatory output language specified below. No exceptions — not even for page names or section headings.",
+    "",
+    "If you start with anything other than `---FILE:`, the entire response will be discarded.",
+    "",
+    // Repeat the language directive at the very end so it wins the "most
+    // recent instruction" tie-breaker. Small-to-medium models otherwise
+    // drift back to their training-data language for individual pages.
+    "---",
+    "",
+    languageRule(sourceContent),
   ].filter(Boolean).join("\n")
 }
 
@@ -536,7 +660,7 @@ export async function startIngest(
   const systemPrompt = [
     "You are a knowledgeable assistant helping to build a wiki from source documents.",
     "",
-    LANGUAGE_RULE,
+    languageRule(sourceContent),
     "",
     purpose ? `## Wiki Purpose\n${purpose}` : "",
     schema ? `## Wiki Schema\n${schema}` : "",
@@ -631,10 +755,18 @@ export async function executeIngestWrites(
 
   let accumulated = ""
 
+  // In auto mode, fall back to detecting language from the chat history
+  // (user's discussion messages) rather than the empty string, which would
+  // default to English regardless of the source content.
+  const historyText = conversationHistory
+    .map((m) => m.content)
+    .join("\n")
+    .slice(0, 2000)
+
   const systemPrompt = [
     "You are a wiki generation assistant. Your task is to produce structured wiki file contents.",
     "",
-    LANGUAGE_RULE,
+    languageRule(historyText),
     schema ? `## Wiki Schema\n${schema}` : "",
   ]
     .filter(Boolean)

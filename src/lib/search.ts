@@ -1,6 +1,6 @@
 import { readFile, listDirectory } from "@/commands/fs"
 import type { FileNode } from "@/types/wiki"
-import { normalizePath } from "@/lib/path-utils"
+import { normalizePath, getFileStem } from "@/lib/path-utils"
 
 export interface SearchResult {
   path: string
@@ -12,7 +12,31 @@ export interface SearchResult {
 
 const MAX_RESULTS = 20
 const SNIPPET_CONTEXT = 80
-const TITLE_MATCH_BONUS = 10
+
+// ── Scoring weights ────────────────────────────────────────────────────────
+// Exact lexical matches dominate everything else. The rationale: when a
+// user types "attention", the page literally named `attention.md` MUST
+// rank first, regardless of how many other pages also mention the word.
+//
+//   filename == query (e.g. `attention.md` for query "attention")
+//     → FILENAME_EXACT_BONUS — large enough that nothing short of an
+//       equally-exact match can outrank it.
+//
+//   title or content contains the raw query as a substring
+//     → PHRASE_IN_TITLE_BONUS / PHRASE_IN_CONTENT_PER_OCC — phrase
+//       presence is worth far more than individual token presence, and
+//       in content it rewards repetition (with a cap to avoid runaway).
+//
+//   per-token matches (existing behavior, but now smaller weight)
+//     → TITLE_TOKEN_WEIGHT / CONTENT_TOKEN_WEIGHT. These used to
+//       dominate via a flat +10 title bonus regardless of how many
+//       tokens matched; now each matched token counts individually.
+const FILENAME_EXACT_BONUS = 200
+const PHRASE_IN_TITLE_BONUS = 50
+const PHRASE_IN_CONTENT_PER_OCC = 20
+const MAX_PHRASE_OCC_COUNTED = 10 // cap to avoid runaway on huge logs
+const TITLE_TOKEN_WEIGHT = 5
+const CONTENT_TOKEN_WEIGHT = 1
 
 const STOP_WORDS = new Set([
   "的", "是", "了", "什么", "在", "有", "和", "与", "对", "从",
@@ -68,6 +92,19 @@ function tokenMatchScore(text: string, tokens: readonly string[]): number {
     if (lower.includes(token)) score += 1
   }
   return score
+}
+
+function countOccurrences(haystackLower: string, needleLower: string): number {
+  if (!needleLower || needleLower.length === 0) return 0
+  let count = 0
+  let pos = 0
+  while (true) {
+    const idx = haystackLower.indexOf(needleLower, pos)
+    if (idx === -1) break
+    count++
+    pos = idx + needleLower.length
+  }
+  return count
 }
 
 function flattenMdFiles(nodes: FileNode[]): FileNode[] {
@@ -159,14 +196,15 @@ export async function searchWiki(
 
       let boosted = 0
       let added = 0
-      const existingPaths = new Set(results.map((r) => r.path))
+      // Normalize existing paths to forward slashes so Windows backslash
+      // paths from the filesystem match the forward-slash paths we
+      // construct for tryPath below.
+      const existingPaths = new Set(results.map((r) => normalizePath(r.path)))
 
       for (const vr of vectorResults) {
-        // Check if already in results
-        const existing = results.find((r) => {
-          const fileName = r.path.split("/").pop()?.replace(/\.md$/, "") ?? ""
-          return fileName === vr.id
-        })
+        // Check if already in results. getFileStem handles both / and \
+        // separators so this works on Windows.
+        const existing = results.find((r) => getFileStem(r.path) === vr.id)
 
         if (existing) {
           // Boost score of existing result
@@ -221,6 +259,8 @@ async function searchFiles(
   query: string,
   results: SearchResult[],
 ): Promise<void> {
+  const queryPhrase = query.trim().toLowerCase()
+
   for (const file of files) {
     let content = ""
     try {
@@ -231,24 +271,54 @@ async function searchFiles(
 
     const title = extractTitle(content, file.name)
     const titleText = `${title} ${file.name}`
+    const titleLower = titleText.toLowerCase()
+    const contentLower = content.toLowerCase()
+    const fileStem = file.name.replace(/\.md$/, "").toLowerCase()
 
-    const titleScore = tokenMatchScore(titleText, tokens)
-    const contentScore = tokenMatchScore(content, tokens)
+    // Exact-match signals (strongest)
+    const filenameExact = fileStem === queryPhrase
+    const titleHasPhrase =
+      queryPhrase.length > 0 && titleLower.includes(queryPhrase)
+    const contentPhraseOcc = Math.min(
+      countOccurrences(contentLower, queryPhrase),
+      MAX_PHRASE_OCC_COUNTED,
+    )
 
-    if (titleScore === 0 && contentScore === 0) continue
+    // Token-level signals (fallback / density)
+    const titleTokenScore = tokenMatchScore(titleText, tokens)
+    const contentTokenScore = tokenMatchScore(content, tokens)
 
-    const isTitleMatch = titleScore > 0
-    const score = contentScore + (isTitleMatch ? TITLE_MATCH_BONUS : 0)
+    // Must have at least one signal to be included
+    if (
+      !filenameExact &&
+      !titleHasPhrase &&
+      contentPhraseOcc === 0 &&
+      titleTokenScore === 0 &&
+      contentTokenScore === 0
+    ) {
+      continue
+    }
 
-    const firstMatchingToken = tokens.find((t) =>
-      content.toLowerCase().includes(t),
-    ) ?? query
-    const snippet = buildSnippet(content, firstMatchingToken)
+    const score =
+      (filenameExact ? FILENAME_EXACT_BONUS : 0) +
+      (titleHasPhrase ? PHRASE_IN_TITLE_BONUS : 0) +
+      contentPhraseOcc * PHRASE_IN_CONTENT_PER_OCC +
+      titleTokenScore * TITLE_TOKEN_WEIGHT +
+      contentTokenScore * CONTENT_TOKEN_WEIGHT
+
+    const isTitleMatch = titleTokenScore > 0 || titleHasPhrase
+
+    // Prefer snipping around the full phrase when it exists; otherwise
+    // pick the first matching token; otherwise the raw query.
+    const snippetAnchor =
+      contentPhraseOcc > 0
+        ? queryPhrase
+        : tokens.find((t) => contentLower.includes(t)) ?? query
 
     results.push({
       path: file.path,
       title,
-      snippet,
+      snippet: buildSnippet(content, snippetAnchor),
       titleMatch: isTitleMatch,
       score,
     })

@@ -1,6 +1,6 @@
 import { load } from "@tauri-apps/plugin-store"
 import type { WikiProject } from "@/types/wiki"
-import type { LlmConfig, SearchApiConfig, EmbeddingConfig } from "@/stores/wiki-store"
+import type { LlmConfig, SearchApiConfig, EmbeddingConfig, OutputLanguage } from "@/stores/wiki-store"
 
 const STORE_NAME = "app-state.json"
 const RECENT_PROJECTS_KEY = "recentProjects"
@@ -93,4 +93,16 @@ export async function saveLanguage(lang: string): Promise<void> {
 export async function loadLanguage(): Promise<string | null> {
   const store = await getStore()
   return (await store.get<string>(LANGUAGE_KEY)) ?? null
+}
+
+const OUTPUT_LANGUAGE_KEY = "outputLanguage"
+
+export async function saveOutputLanguage(lang: OutputLanguage): Promise<void> {
+  const store = await getStore()
+  await store.set(OUTPUT_LANGUAGE_KEY, lang)
+}
+
+export async function loadOutputLanguage(): Promise<OutputLanguage | null> {
+  const store = await getStore()
+  return (await store.get<OutputLanguage>(OUTPUT_LANGUAGE_KEY)) ?? null
 }

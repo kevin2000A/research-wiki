@@ -32,6 +32,8 @@ export function SettingsView() {
   const setSearchApiConfig = useWikiStore((s) => s.setSearchApiConfig)
   const embeddingConfig = useWikiStore((s) => s.embeddingConfig)
   const setEmbeddingConfig = useWikiStore((s) => s.setEmbeddingConfig)
+  const outputLanguage = useWikiStore((s) => s.outputLanguage)
+  const setOutputLanguage = useWikiStore((s) => s.setOutputLanguage)
   const maxHistoryMessages = useChatStore((s) => s.maxHistoryMessages)
   const setMaxHistoryMessages = useChatStore((s) => s.setMaxHistoryMessages)
 
@@ -47,6 +49,7 @@ export function SettingsView() {
   const [embeddingEndpoint, setEmbeddingEndpoint] = useState(embeddingConfig.endpoint)
   const [embeddingApiKey, setEmbeddingApiKey] = useState(embeddingConfig.apiKey)
   const [embeddingModel, setEmbeddingModel] = useState(embeddingConfig.model)
+  const [localOutputLang, setLocalOutputLang] = useState(outputLanguage)
   const [saved, setSaved] = useState(false)
   const [currentLang, setCurrentLang] = useState(i18n.language)
 
@@ -63,10 +66,14 @@ export function SettingsView() {
     setSearchApiKey(searchApiConfig.apiKey)
   }, [searchApiConfig])
 
+  useEffect(() => {
+    setLocalOutputLang(outputLanguage)
+  }, [outputLanguage])
+
   const currentProvider = PROVIDERS.find((p) => p.value === provider)
 
   async function handleSave() {
-    const { saveLlmConfig, saveSearchApiConfig, saveEmbeddingConfig } = await import("@/lib/project-store")
+    const { saveLlmConfig, saveSearchApiConfig, saveEmbeddingConfig, saveOutputLanguage } = await import("@/lib/project-store")
     const newConfig = { provider, apiKey, model, ollamaUrl, customEndpoint, maxContextSize }
     const newSearchConfig = { provider: searchProvider, apiKey: searchApiKey }
     const newEmbeddingConfig = { enabled: embeddingEnabled, endpoint: embeddingEndpoint, apiKey: embeddingApiKey, model: embeddingModel }
@@ -74,6 +81,8 @@ export function SettingsView() {
     await saveSearchApiConfig(newSearchConfig)
     setEmbeddingConfig(newEmbeddingConfig)
     await saveEmbeddingConfig(newEmbeddingConfig)
+    setOutputLanguage(localOutputLang)
+    await saveOutputLanguage(localOutputLang)
     setLlmConfig(newConfig)
     await saveLlmConfig(newConfig)
     setSaved(true)
@@ -111,6 +120,45 @@ export function SettingsView() {
               ))}
             </div>
             <p className="text-xs text-muted-foreground">{t("settings.languageHint")}</p>
+          </div>
+
+          {/* Target Language section */}
+          <div className="space-y-4 rounded-lg border p-4">
+            <h3 className="font-semibold">AI Target Language</h3>
+            <p className="text-xs text-muted-foreground">
+              Force all AI-generated content (chat responses, wiki pages, research results, lint reports) to use the selected target language.
+              Choose "Auto" to match the user's input or source document language.
+            </p>
+            <div className="space-y-2">
+              <Label>Language</Label>
+              <select
+                value={localOutputLang}
+                onChange={(e) => setLocalOutputLang(e.target.value as typeof localOutputLang)}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+              >
+                <option value="auto">Auto (detect from input/source)</option>
+                <option value="English">English</option>
+                <option value="Chinese">简体中文 (Simplified Chinese)</option>
+                <option value="Traditional Chinese">繁體中文 (Traditional Chinese)</option>
+                <option value="Japanese">日本語 (Japanese)</option>
+                <option value="Korean">한국어 (Korean)</option>
+                <option value="Vietnamese">Tiếng Việt (Vietnamese)</option>
+                <option value="French">Français (French)</option>
+                <option value="German">Deutsch (German)</option>
+                <option value="Spanish">Español (Spanish)</option>
+                <option value="Portuguese">Português (Portuguese)</option>
+                <option value="Italian">Italiano (Italian)</option>
+                <option value="Russian">Русский (Russian)</option>
+                <option value="Arabic">العربية (Arabic)</option>
+                <option value="Hindi">हिन्दी (Hindi)</option>
+                <option value="Turkish">Türkçe (Turkish)</option>
+                <option value="Dutch">Nederlands (Dutch)</option>
+                <option value="Polish">Polski (Polish)</option>
+                <option value="Swedish">Svenska (Swedish)</option>
+                <option value="Indonesian">Bahasa Indonesia (Indonesian)</option>
+                <option value="Thai">ไทย (Thai)</option>
+              </select>
+            </div>
           </div>
 
           {/* LLM Provider section */}

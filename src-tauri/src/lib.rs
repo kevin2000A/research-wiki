@@ -1,10 +1,16 @@
 mod clip_server;
 mod commands;
+mod panic_guard;
 mod types;
+
+use panic_guard::run_guarded;
 
 #[tauri::command]
 fn clip_server_status() -> String {
-    clip_server::get_daemon_status().to_string()
+    run_guarded("clip_server_status", || {
+        Ok(clip_server::get_daemon_status().to_string())
+    })
+    .unwrap_or_else(|e| format!("error: {e}"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -15,6 +21,15 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .setup(|app| {
+            // Let the PDF extractor find the bundled pdfium dynamic
+            // library via Tauri's platform-correct resource path.
+            use tauri::Manager;
+            if let Ok(dir) = app.path().resource_dir() {
+                commands::fs::set_resource_dir_hint(dir);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::fs::read_file,
             commands::fs::write_file,

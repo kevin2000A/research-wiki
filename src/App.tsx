@@ -5,7 +5,7 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { useReviewStore } from "@/stores/review-store"
 import { useChatStore } from "@/stores/chat-store"
 import { listDirectory, openProject } from "@/commands/fs"
-import { getLastProject, getRecentProjects, saveLastProject, loadLlmConfig, loadLanguage, loadSearchApiConfig, loadEmbeddingConfig } from "@/lib/project-store"
+import { getLastProject, getRecentProjects, saveLastProject, loadLlmConfig, loadLanguage, loadSearchApiConfig, loadEmbeddingConfig, loadOutputLanguage } from "@/lib/project-store"
 import { loadReviewItems, loadChatHistory } from "@/lib/persist"
 import { setupAutoSave } from "@/lib/auto-save"
 import { startClipWatcher } from "@/lib/clip-watcher"
@@ -45,6 +45,10 @@ function App() {
         if (savedEmbeddingConfig) {
           useWikiStore.getState().setEmbeddingConfig(savedEmbeddingConfig)
         }
+        const savedOutputLang = await loadOutputLanguage()
+        if (savedOutputLang) {
+          useWikiStore.getState().setOutputLanguage(savedOutputLang)
+        }
         const savedLang = await loadLanguage()
         if (savedLang) {
           await i18n.changeLanguage(savedLang)
@@ -68,9 +72,18 @@ function App() {
   }, [])
 
   async function handleProjectOpened(proj: WikiProject) {
+    // Clear all per-project state BEFORE loading new project data
+    // to prevent cross-project contamination. MUST be awaited so the
+    // ingest queue / graph cache are actually cleared before the new
+    // project's state is populated.
+    const { resetProjectState } = await import("@/lib/reset-project-state")
+    await resetProjectState()
+
     setProject(proj)
     setSelectedFile(null)
     setActiveView("wiki")
+    // Bump data version so any cached graphs/views invalidate
+    useWikiStore.getState().bumpDataVersion()
     await saveLastProject(proj)
 
     // Restore ingest queue (resume interrupted tasks)
@@ -151,7 +164,11 @@ function App() {
     }
   }
 
-  function handleSwitchProject() {
+  async function handleSwitchProject() {
+    // Clear all per-project state BEFORE flipping back to the welcome screen
+    // so old data cannot leak in via any async render pass.
+    const { resetProjectState } = await import("@/lib/reset-project-state")
+    await resetProjectState()
     setProject(null)
     setFileTree([])
     setSelectedFile(null)

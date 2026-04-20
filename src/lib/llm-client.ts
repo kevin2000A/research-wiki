@@ -23,6 +23,13 @@ export async function streamChat(
   messages: import("./llm-providers").ChatMessage[],
   callbacks: StreamCallbacks,
   signal?: AbortSignal,
+  /**
+   * Extra fields to merge into the request body. Use for provider-specific
+   * knobs like `temperature`, `top_p`, `max_tokens`. Callers that need
+   * strict format adherence (e.g. ingest stage 2 emitting FILE blocks)
+   * should pass `{ temperature: 0.1 }` to reduce sampling variance.
+   */
+  requestOverrides?: Record<string, unknown>,
 ): Promise<void> {
   const { onToken, onDone, onError } = callbacks
   const providerConfig = getProviderConfig(config)
@@ -48,10 +55,12 @@ export async function streamChat(
 
   let response: Response
   try {
+    const baseBody = providerConfig.buildBody(messages) as Record<string, unknown>
+    const body = requestOverrides ? { ...baseBody, ...requestOverrides } : baseBody
     response = await fetch(providerConfig.url, {
       method: "POST",
       headers: providerConfig.headers,
-      body: JSON.stringify(providerConfig.buildBody(messages)),
+      body: JSON.stringify(body),
       signal: combinedSignal,
       // @ts-ignore — keepalive hint for Tauri webview
       keepalive: false,

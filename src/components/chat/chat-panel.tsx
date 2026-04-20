@@ -13,7 +13,7 @@ import { buildRetrievalGraph, getRelatedNodes } from "@/lib/graph-relevance"
 import { useReviewStore } from "@/stores/review-store"
 import type { FileNode } from "@/types/wiki"
 import { normalizePath, getFileName, getRelativePath } from "@/lib/path-utils"
-import { detectLanguage } from "@/lib/detect-language"
+import { getOutputLanguage, buildLanguageReminder } from "@/lib/output-language"
 
 // Store the page mapping from the last query so SourceFilesBar can show which pages were cited
 export let lastQueryPages: { title: string; path: string }[] = []
@@ -168,6 +168,7 @@ export function ChatPanel() {
       // Build system prompt with wiki context using graph-enhanced retrieval
       const systemMessages: LLMMessage[] = []
       let queryRefs: { title: string; path: string }[] = []
+      let langReminder: string | undefined
       if (project) {
         const pp = normalizePath(project.path)
         const dataVersion = useWikiStore.getState().dataVersion
@@ -283,13 +284,12 @@ export function ChatPanel() {
           `[${i + 1}] ${p.title} (${p.path})`
         ).join("\n")
 
+        const outLang = getOutputLanguage(text)
+
         systemMessages.push({
           role: "system",
           content: [
             "You are a knowledgeable wiki assistant. Answer questions based on the wiki content provided below.",
-            "",
-            `## CRITICAL: Response Language`,
-            `The user is writing in **${detectLanguage(text)}**. You MUST respond in **${detectLanguage(text)}** regardless of what language the wiki content is written in. This is a mandatory requirement.`,
             "",
             "## Rules",
             "- Answer based ONLY on the numbered wiki pages provided below.",
@@ -305,8 +305,22 @@ export function ChatPanel() {
             index ? `## Wiki Index\n${index}` : "",
             relevantPages.length > 0 ? `## Page List\n${pageList}` : "",
             `## Wiki Pages\n\n${pagesContext}`,
+            "",
+            "---",
+            "",
+            `## ⚠️ MANDATORY OUTPUT LANGUAGE: ${outLang}`,
+            "",
+            `You MUST write your entire response in **${outLang}**.`,
+            `The wiki content above may be in a different language, but this is IRRELEVANT to your output language.`,
+            `Ignore the language of the wiki content. Write in ${outLang} only.`,
+            `Even proper nouns should use standard ${outLang} transliteration when appropriate.`,
+            `DO NOT use any other language. This overrides all other instructions.`,
           ].filter(Boolean).join("\n"),
         })
+
+        // Reminder injected later, right before the user's current message
+        // (after history so it's the last system instruction the LLM sees).
+        langReminder = buildLanguageReminder(text)
 
         lastQueryPages = relevantPages.map((p) => ({ title: p.title, path: p.path }))
         queryRefs = [...lastQueryPages]
@@ -318,7 +332,16 @@ export function ChatPanel() {
         .filter((m) => m.role === "user" || m.role === "assistant")
         .slice(-maxHistoryMessages)
 
-      const llmMessages = [...systemMessages, ...chatMessagesToLLM(activeConvMessages)]
+      // Inject language reminder as system message between history and final user query
+      const historyMessages = chatMessagesToLLM(activeConvMessages)
+      const llmMessages = langReminder && historyMessages.length > 0
+        ? [
+            ...systemMessages,
+            ...historyMessages.slice(0, -1),
+            { role: "system" as const, content: langReminder },
+            ...historyMessages.slice(-1),
+          ]
+        : [...systemMessages, ...historyMessages]
 
       const controller = new AbortController()
       abortRef.current = controller

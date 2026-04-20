@@ -153,10 +153,21 @@ export function getProviderConfig(config: LlmConfig): ProviderConfig {
         headers: {
           "Content-Type": JSON_CONTENT_TYPE,
         },
-        buildBody: (messages) => ({
-          ...buildOpenAiBody(messages),
-          model,
-        }),
+        buildBody: (messages) => {
+          const body: Record<string, unknown> = {
+            ...buildOpenAiBody(messages),
+            model,
+          }
+          // Qwen3 thinking mode disable. Recognized by llama.cpp server
+          // launched with `--jinja` (reads chat_template_kwargs from the
+          // OpenAI body and forwards to the Jinja chat template). Real
+          // Ollama silently ignores unknown fields, so this is safe.
+          // Requires llama-server --jinja; without it, thinking stays on.
+          if (/qwen[-_]?3/i.test(model)) {
+            body.chat_template_kwargs = { enable_thinking: false }
+          }
+          return body
+        },
         parseStream: parseOpenAiLine,
       }
 
