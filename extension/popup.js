@@ -537,7 +537,7 @@ async function extractTweet() {
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId: activeTabId },
-      func: (targetTweetId) => {
+      func: (targetTweetId, targetHandle, canonicalTweetUrl) => {
         try {
           function absoluteUrl(raw) {
             const value = (raw || "").trim();
@@ -549,8 +549,22 @@ async function extractTweet() {
             }
           }
 
+          function canonicalStatusUrl(raw, fallbackHandle = "") {
+            const absolute = absoluteUrl(raw);
+            if (!absolute) return "";
+            try {
+              const url = new URL(absolute);
+              const host = url.hostname.replace(/^www\./, "");
+              const match = url.pathname.match(/^\/([^/]+)\/status\/(\d+)/i);
+              if (!match) return "";
+              return `https://${host}/${match[1] || fallbackHandle.replace(/^@/, "")}/status/${match[2]}`;
+            } catch {
+              return "";
+            }
+          }
+
           function statusIdFromUrl(raw) {
-            const url = absoluteUrl(raw);
+            const url = canonicalStatusUrl(raw);
             const match = url.match(/\/status\/(\d+)/);
             return match ? match[1] : "";
           }
@@ -559,16 +573,31 @@ async function extractTweet() {
             return [...new Set(values.filter(Boolean))];
           }
 
+          function normalizeMediaUrl(raw) {
+            const absolute = absoluteUrl(raw);
+            if (!absolute) return "";
+            try {
+              const url = new URL(absolute);
+              if (url.hostname !== "pbs.twimg.com") return absolute;
+              if (url.searchParams.has("name")) {
+                url.searchParams.set("name", "orig");
+              }
+              return url.toString();
+            } catch {
+              return absolute;
+            }
+          }
+
           function bestImageUrl(node) {
-            const current = absoluteUrl(node.currentSrc || "");
+            const current = normalizeMediaUrl(node.currentSrc || "");
             if (current) return current;
-            const direct = absoluteUrl(node.getAttribute("src") || "");
+            const direct = normalizeMediaUrl(node.getAttribute("src") || "");
             if (direct) return direct;
             const srcset = node.getAttribute("srcset") || "";
             const candidates = srcset
               .split(",")
               .map((part) => part.trim().split(/\s+/)[0] || "")
-              .map((url) => absoluteUrl(url))
+              .map((url) => normalizeMediaUrl(url))
               .filter(Boolean);
             return candidates[0] || "";
           }
@@ -601,7 +630,12 @@ async function extractTweet() {
           }
 
           const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
-          const mainArticle = articles.find((article) =>
+          const mainArticle = articles.find((article) => {
+            const author = collectAuthor(article);
+            return Array.from(article.querySelectorAll('a[href*="/status/"]')).some((link) =>
+              statusIdFromUrl(link.href) === targetTweetId && (!targetHandle || author.authorHandle === targetHandle),
+            );
+          }) || articles.find((article) =>
             Array.from(article.querySelectorAll('a[href*="/status/"]')).some((link) => statusIdFromUrl(link.href) === targetTweetId),
           );
 
@@ -610,14 +644,21 @@ async function extractTweet() {
           }
 
           const statusLinks = uniqueStrings(
-            Array.from(mainArticle.querySelectorAll('a[href*="/status/"]')).map((link) => absoluteUrl(link.href)),
+            Array.from(mainArticle.querySelectorAll('a[href*="/status/"]')).map((link) => canonicalStatusUrl(link.href, targetHandle)),
           );
-          const primaryUrl =
+          const primaryUrl = canonicalTweetUrl ||
             statusLinks.find((url) => statusIdFromUrl(url) === targetTweetId) ||
-            absoluteUrl(location.href);
-          const textNodes = Array.from(mainArticle.querySelectorAll('div[data-testid="tweetText"]'))
+            canonicalStatusUrl(location.href, targetHandle);
+          let textNodes = Array.from(mainArticle.querySelectorAll('div[data-testid="tweetText"]'))
             .map((node) => node.innerText.trim())
             .filter(Boolean);
+          if (textNodes.length === 0) {
+            textNodes = uniqueStrings(
+              Array.from(mainArticle.querySelectorAll('div[lang], span[lang]'))
+                .map((node) => node.innerText.trim())
+                .filter(Boolean),
+            );
+          }
           const timeNode = mainArticle.querySelector("time");
           const media = [];
           Array.from(mainArticle.querySelectorAll('[data-testid="tweetPhoto"] img')).forEach((img) => {
@@ -663,7 +704,7 @@ async function extractTweet() {
           };
         }
       },
-      args: [status.tweetId],
+      args: [status.tweetId, status.handle, status.url],
     });
 
     const result = results?.[0]?.result;
