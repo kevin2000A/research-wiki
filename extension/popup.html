@@ -37,7 +37,7 @@
     }
     .mode-toggle {
       display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
+      grid-template-columns: 1fr 1fr;
       gap: 6px;
       margin-bottom: 10px;
     }
@@ -311,8 +311,7 @@
 
     <div class="mode-toggle">
       <button class="mode-btn active" id="webModeBtn" type="button">Web Page</button>
-      <button class="mode-btn" id="paperModeBtn" type="button">arXiv Paper</button>
-      <button class="mode-btn" id="tweetModeBtn" type="button">X / Twitter</button>
+      <button class="mode-btn" id="paperModeBtn" type="button">Structured Source</button>
     </div>
 
     <div class="field">
@@ -341,6 +340,18 @@
 
     <div id="paperFields" class="hidden">
       <div class="field">
+        <label>Detected Source</label>
+        <div id="sourceTypePreview" class="url-preview">—</div>
+      </div>
+
+      <div class="field">
+        <label>Source URL</label>
+        <div id="sourceUrlPreview" class="url-preview">—</div>
+        <div class="hint">arXiv papers and single tweet status pages share one background queue. arXiv downloads arxiv2md/PDF in background; tweets snapshot the parsed content and download media in background.</div>
+      </div>
+
+      <div id="arxivFields">
+      <div class="field">
         <label>arXiv / alphaXiv URL or ID</label>
         <input type="text" id="paperInput" placeholder="https://arxiv.org/abs/2401.12345 or 2401.12345">
         <div class="hint">Background queue downloads arxiv2md Markdown first, falls back to PDF only if needed, and only saves to raw/sources. Ingest later inside LLM Wiki.</div>
@@ -368,8 +379,16 @@
       </details>
 
       <div class="field">
-        <label>Paper Preview</label>
+        <label>arXiv Preview</label>
         <div id="paperPreview" class="preview-box">Enter an arXiv URL, alphaXiv URL, or paper ID.</div>
+      </div>
+      </div>
+
+      <div id="tweetFields" class="hidden">
+        <div class="field">
+          <label>Tweet Preview</label>
+          <div id="tweetPreview" class="preview-box">Open a tweet status page to parse the current tweet.</div>
+        </div>
       </div>
 
       <button class="btn btn-primary paper-action-btn" id="paperAddBtn" type="button" disabled>
@@ -377,7 +396,7 @@
       </button>
 
       <div class="queue-toolbar">
-        <div id="paperQueueSummary" class="queue-summary">No queued papers yet.</div>
+        <div id="paperQueueSummary" class="queue-summary">No structured sources queued yet.</div>
         <div class="queue-toolbar-actions">
           <button class="mini-btn" id="refreshQueueBtn" type="button">Refresh</button>
           <button class="mini-btn" id="clearDoneBtn" type="button">Clear Done</button>
@@ -385,20 +404,7 @@
       </div>
 
       <div id="paperQueueList" class="queue-list">
-        <div class="queue-empty">No papers queued yet.</div>
-      </div>
-    </div>
-
-    <div id="tweetFields" class="hidden">
-      <div class="field">
-        <label>Tweet URL</label>
-        <div id="tweetUrlPreview" class="url-preview">—</div>
-        <div class="hint">Single status pages only in v1. The extension extracts the main tweet, quoted tweet summary, and images when available.</div>
-      </div>
-
-      <div class="field">
-        <label>Tweet Preview</label>
-        <div id="tweetPreview" class="preview-box">Open a tweet status page to parse the current tweet.</div>
+        <div class="queue-empty">No structured sources queued yet.</div>
       </div>
     </div>
 
