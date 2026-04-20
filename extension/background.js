@@ -29,6 +29,58 @@ function safeArxivFileStem(arxivId) {
   return arxivId.replace(/[^A-Za-z0-9._-]/g, "-");
 }
 
+function sanitizeFileStem(value) {
+  return String(value || "")
+    .replace(/[^A-Za-z0-9._-]/g, "-")
+    .replace(/^-+|-+$/g, "") || "asset";
+}
+
+function extensionForMime(mimeType) {
+  const mime = (mimeType || "").split(";")[0].trim().toLowerCase();
+  return {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/svg+xml": "svg",
+    "image/bmp": "bmp",
+    "image/tiff": "tiff",
+    "image/avif": "avif",
+  }[mime] || "img";
+}
+
+function normalizeTweetMedia(value) {
+  return Array.isArray(value)
+    ? value
+      .filter((item) => item && typeof item.url === "string" && item.url)
+      .map((item) => ({
+        url: item.url,
+        alt: typeof item.alt === "string" ? item.alt : "",
+      }))
+    : [];
+}
+
+function normalizeTweetSnapshot(value) {
+  const quoted = value?.quotedTweet && typeof value.quotedTweet === "object"
+    ? {
+        url: typeof value.quotedTweet.url === "string" ? value.quotedTweet.url : "",
+        authorName: typeof value.quotedTweet.authorName === "string" ? value.quotedTweet.authorName : "",
+        authorHandle: typeof value.quotedTweet.authorHandle === "string" ? value.quotedTweet.authorHandle : "",
+        text: typeof value.quotedTweet.text === "string" ? value.quotedTweet.text : "",
+      }
+    : null;
+  return {
+    tweetId: typeof value?.tweetId === "string" ? value.tweetId : "",
+    url: typeof value?.url === "string" ? value.url : "",
+    authorName: typeof value?.authorName === "string" ? value.authorName : "",
+    authorHandle: typeof value?.authorHandle === "string" ? value.authorHandle : "",
+    createdAt: typeof value?.createdAt === "string" ? value.createdAt : "",
+    text: typeof value?.text === "string" ? value.text : "",
+    media: normalizeTweetMedia(value?.media),
+    quotedTweet: quoted && (quoted.url || quoted.text) ? quoted : null,
+  };
+}
+
 function normalizeArxivSettings(value) {
   return {
     removeRefs: Boolean(value?.removeRefs),
@@ -59,7 +111,10 @@ function paperUrls(arxivId, settings = DEFAULT_ARXIV_SETTINGS) {
 }
 
 function queueTaskKey(task) {
-  return `${task.projectPath}::${task.arxivId}`;
+  if (task.kind === "tweet") {
+    return `${task.projectPath}::tweet::${task.tweet?.tweetId || ""}`;
+  }
+  return `${task.projectPath}::arxiv::${task.arxivId}`;
 }
 
 function arrayBufferToBase64(buffer) {
@@ -123,9 +178,12 @@ function emptyQueueState() {
 }
 
 function normalizeTask(task) {
+  const kind = task?.kind === "tweet" ? "tweet" : "arxiv";
   return {
-    id: typeof task?.id === "string" ? task.id : `paper-${now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: typeof task?.id === "string" ? task.id : `source-${now()}-${Math.random().toString(36).slice(2, 8)}`,
+    kind,
     arxivId: parseArxivInput(task?.arxivId || ""),
+    tweet: normalizeTweetSnapshot(task?.tweet),
     projectPath: typeof task?.projectPath === "string" ? task.projectPath : "",
     projectName: typeof task?.projectName === "string" ? task.projectName : "",
     status: typeof task?.status === "string" ? task.status : "queued",
@@ -147,7 +205,7 @@ async function getQueueState() {
   return {
     tasks: stored.tasks
       .map(normalizeTask)
-      .filter((task) => task.arxivId && task.projectPath),
+      .filter((task) => task.projectPath && (task.kind === "tweet" ? task.tweet.tweetId : task.arxivId)),
   };
 }
 
@@ -191,22 +249,33 @@ async function updateTask(taskId, updater) {
   return task;
 }
 
-async function enqueuePaperTask(payload) {
+async function enqueueSourceTask(payload) {
+  const kind = payload?.kind === "tweet" ? "tweet" : "arxiv";
   const arxivId = parseArxivInput(payload?.arxivId || "");
+  const tweet = normalizeTweetSnapshot(payload?.tweet);
   const projectPath = (payload?.projectPath || "").trim();
   const projectName = (payload?.projectName || "").trim();
-  if (!arxivId) throw new Error("Invalid arXiv ID");
   if (!projectPath) throw new Error("projectPath is required");
+  if (kind === "tweet") {
+    if (!tweet.tweetId || !tweet.url) throw new Error("Invalid tweet snapshot");
+  } else if (!arxivId) {
+    throw new Error("Invalid arXiv ID");
+  }
 
   const state = await getQueueState();
-  const duplicate = state.tasks.find((task) => queueTaskKey(task) === `${projectPath}::${arxivId}`);
+  const duplicateKey = kind === "tweet"
+    ? `${projectPath}::tweet::${tweet.tweetId}`
+    : `${projectPath}::arxiv::${arxivId}`;
+  const duplicate = state.tasks.find((task) => queueTaskKey(task) === duplicateKey);
   if (duplicate) {
     return { ok: true, added: false, duplicate: true, task: duplicate, tasks: state.tasks };
   }
 
   const task = normalizeTask({
-    id: `paper-${now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `source-${now()}-${Math.random().toString(36).slice(2, 8)}`,
+    kind,
     arxivId,
+    tweet,
     projectPath,
     projectName,
     status: "queued",
@@ -244,7 +313,7 @@ async function removePaperTask(taskId) {
   const task = state.tasks.find((item) => item.id === taskId);
   if (!task) throw new Error("Task not found");
   if (task.status === "fetching" || task.status === "saving") {
-    throw new Error("Cannot remove a paper while it is downloading or saving");
+    throw new Error("Cannot remove a source while it is downloading or saving");
   }
   state.tasks = state.tasks.filter((item) => item.id !== taskId);
   await saveQueueState(state);
@@ -353,6 +422,32 @@ async function saveArtifactToApp(task, artifact) {
   return data;
 }
 
+async function saveTweetToApp(task, tweet, assets) {
+  const response = await fetch(`${API_URL}/tweet`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      projectPath: task.projectPath,
+      tweet,
+      assets,
+    }),
+  });
+
+  const bodyText = await response.text();
+  let data = null;
+  try {
+    data = JSON.parse(bodyText);
+  } catch {
+    throw new Error(`Invalid JSON from LLM Wiki: ${bodyText.slice(0, 240)}`);
+  }
+
+  if (!response.ok || !data?.ok) {
+    throw new Error(data?.error || `LLM Wiki HTTP ${response.status}`);
+  }
+
+  return data;
+}
+
 async function processPaperTask(task) {
   const urls = paperUrls(task.arxivId, task.arxivSettings);
   const stem = safeArxivFileStem(task.arxivId);
@@ -430,6 +525,74 @@ async function processPaperTask(task) {
   };
 }
 
+async function processTweetTask(task) {
+  if (!task.tweet?.tweetId || !task.tweet?.url) {
+    throw new Error("Tweet snapshot is missing required fields");
+  }
+
+  const mediaItems = Array.isArray(task.tweet.media) ? task.tweet.media : [];
+  await updateTask(task.id, (item) => {
+    item.status = "fetching";
+    item.statusText = mediaItems.length > 0
+      ? `Downloading tweet media (${mediaItems.length})`
+      : "Preparing tweet snapshot";
+    item.error = "";
+    item.attemptCount += 1;
+  });
+
+  const successfulAssets = [];
+  const successfulMedia = [];
+  let failedMediaCount = 0;
+
+  for (let index = 0; index < mediaItems.length; index += 1) {
+    const media = mediaItems[index];
+    try {
+      const download = await fetchBinaryArtifact(media.url, "image/jpeg");
+      if (!download.mimeType.toLowerCase().startsWith("image/")) {
+        throw new Error(`Unexpected media type ${download.mimeType}`);
+      }
+      const fileName = `${String(index + 1).padStart(3, "0")}-${sanitizeFileStem(task.tweet.tweetId)}.${extensionForMime(download.mimeType)}`;
+      successfulAssets.push({
+        originalUrl: media.url,
+        fileName,
+        mimeType: download.mimeType,
+        dataBase64: arrayBufferToBase64(download.buffer),
+      });
+      successfulMedia.push(media);
+    } catch {
+      failedMediaCount += 1;
+    }
+  }
+
+  await updateTask(task.id, (item) => {
+    item.status = "saving";
+    item.statusText = successfulAssets.length > 0
+      ? `Saving tweet with ${successfulAssets.length}/${mediaItems.length} images`
+      : "Saving tweet to LLM Wiki";
+    item.artifactKind = "tweet";
+    item.fileName = `${sanitizeFileStem(task.tweet.authorHandle || "tweet")}-${sanitizeFileStem(task.tweet.tweetId)}.md`;
+    item.error = "";
+  });
+
+  const result = await saveTweetToApp(
+    task,
+    {
+      ...task.tweet,
+      media: successfulMedia,
+    },
+    successfulAssets,
+  );
+
+  return {
+    artifactKind: "tweet",
+    fileName: result.path || "",
+    paperPath: result.path || "",
+    statusText: failedMediaCount > 0
+      ? `Saved tweet to ${result.path} (${successfulAssets.length}/${mediaItems.length} images downloaded)`
+      : `Saved tweet to ${result.path}`,
+  };
+}
+
 async function processQueue() {
   if (processing) return;
   processing = true;
@@ -440,7 +603,9 @@ async function processQueue() {
     if (!nextTask) return;
 
     try {
-      const result = await processPaperTask(nextTask);
+      const result = nextTask.kind === "tweet"
+        ? await processTweetTask(nextTask)
+        : await processPaperTask(nextTask);
       await updateTask(nextTask.id, (item) => {
         item.status = "done";
         item.statusText = result.statusText;
@@ -484,7 +649,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     if (message.type === "paperQueue/enqueue") {
-      const result = await enqueuePaperTask(message);
+      const result = await enqueueSourceTask(message);
       sendResponse(result);
       return;
     }
@@ -525,7 +690,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm?.name !== QUEUE_ALARM) return;
   processQueue().catch((error) => {
-    console.error("[LLM Wiki Clipper] Failed to process paper queue:", error);
+    console.error("[LLM Wiki Clipper] Failed to process source queue:", error);
   });
 });
 
