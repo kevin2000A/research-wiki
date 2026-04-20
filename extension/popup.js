@@ -559,6 +559,34 @@ async function extractTweet() {
             return [...new Set(values.filter(Boolean))];
           }
 
+          function bestImageUrl(node) {
+            const current = absoluteUrl(node.currentSrc || "");
+            if (current) return current;
+            const direct = absoluteUrl(node.getAttribute("src") || "");
+            if (direct) return direct;
+            const srcset = node.getAttribute("srcset") || "";
+            const candidates = srcset
+              .split(",")
+              .map((part) => part.trim().split(/\s+/)[0] || "")
+              .map((url) => absoluteUrl(url))
+              .filter(Boolean);
+            return candidates[0] || "";
+          }
+
+          function isTweetMediaUrl(url) {
+            return /^https:\/\/pbs\.twimg\.com\//i.test(url)
+              && /\/(media|card_img|amplify_video_thumb|ext_tw_video_thumb|tweet_video_thumb)\//i.test(url);
+          }
+
+          function pushMedia(mediaItems, url, alt) {
+            if (!url || !isTweetMediaUrl(url)) return;
+            if (mediaItems.some((item) => item.url === url)) return;
+            mediaItems.push({
+              url,
+              alt: (alt || "").trim(),
+            });
+          }
+
           function collectAuthor(article, skipFirst = false) {
             const blocks = Array.from(article.querySelectorAll('div[data-testid="User-Name"]'));
             const block = skipFirst ? blocks[1] : blocks[0];
@@ -591,11 +619,22 @@ async function extractTweet() {
             .map((node) => node.innerText.trim())
             .filter(Boolean);
           const timeNode = mainArticle.querySelector("time");
-          const media = uniqueStrings(
-            Array.from(mainArticle.querySelectorAll('[data-testid="tweetPhoto"] img'))
-              .map((img) => absoluteUrl(img.getAttribute("src") || img.currentSrc || ""))
-              .filter(Boolean),
-          ).map((url, index) => ({ url, alt: `tweet-image-${index + 1}` }));
+          const media = [];
+          Array.from(mainArticle.querySelectorAll('[data-testid="tweetPhoto"] img')).forEach((img) => {
+            pushMedia(media, bestImageUrl(img), img.getAttribute("alt") || "tweet-photo");
+          });
+          Array.from(mainArticle.querySelectorAll('[data-testid="card.wrapper"] img')).forEach((img) => {
+            pushMedia(media, bestImageUrl(img), img.getAttribute("alt") || "tweet-card-image");
+          });
+          Array.from(mainArticle.querySelectorAll("video[poster]")).forEach((video) => {
+            pushMedia(media, absoluteUrl(video.getAttribute("poster") || ""), "tweet-video-poster");
+          });
+          Array.from(mainArticle.querySelectorAll("img")).forEach((img) => {
+            pushMedia(media, bestImageUrl(img), img.getAttribute("alt") || "tweet-image");
+          });
+          media.forEach((item, index) => {
+            if (!item.alt) item.alt = `tweet-image-${index + 1}`;
+          });
 
           const quoteUrl = statusLinks.find((url) => statusIdFromUrl(url) && statusIdFromUrl(url) !== targetTweetId) || "";
           const quoteText = textNodes.length > 1 ? textNodes[textNodes.length - 1] : "";
