@@ -10,10 +10,14 @@ const clipBtn = document.getElementById("clipBtn");
 const projectSelect = document.getElementById("projectSelect");
 const webModeBtn = document.getElementById("webModeBtn");
 const paperModeBtn = document.getElementById("paperModeBtn");
+const tweetModeBtn = document.getElementById("tweetModeBtn");
 const webFields = document.getElementById("webFields");
 const paperFields = document.getElementById("paperFields");
+const tweetFields = document.getElementById("tweetFields");
 const paperInput = document.getElementById("paperInput");
 const paperPreview = document.getElementById("paperPreview");
+const tweetUrlPreview = document.getElementById("tweetUrlPreview");
+const tweetPreview = document.getElementById("tweetPreview");
 const paperSettingsSummary = document.getElementById("paperSettingsSummary");
 const removeRefsCheckbox = document.getElementById("removeRefsCheckbox");
 const removeTocCheckbox = document.getElementById("removeTocCheckbox");
@@ -34,6 +38,7 @@ let webExtractionStarted = false;
 let queueTasks = [];
 let queueStateVersion = 0;
 let queueLoadRequestId = 0;
+let extractedTweet = null;
 const ARXIV_SETTINGS_KEY = "llmWikiArxiv2mdSettingsV1";
 const DEFAULT_ARXIV_SETTINGS = {
   removeRefs: false,
@@ -118,6 +123,25 @@ function parseArxivInput(value) {
   if (oldMatch) return oldMatch[1];
   const newMatch = decoded.match(/(\d{4}\.\d{4,5}(?:v\d+)?)/i);
   return newMatch ? newMatch[1] : "";
+}
+
+function parseTwitterStatusUrl(value) {
+  const text = (value || "").trim();
+  if (!text) return null;
+  try {
+    const url = new URL(text);
+    const host = url.hostname.replace(/^www\./, "");
+    if (host !== "x.com" && host !== "twitter.com") return null;
+    const match = url.pathname.match(/^\/([^/]+)\/status\/(\d+)/i);
+    if (!match) return null;
+    return {
+      handle: `@${match[1]}`,
+      tweetId: match[2],
+      url: `https://${host}/${match[1]}/status/${match[2]}`,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function safeArxivFileStem(arxivId) {
@@ -279,6 +303,53 @@ async function loadPaperQueue() {
   }
 }
 
+function tweetAuthorLabel(tweet) {
+  if (!tweet) return "";
+  if (tweet.authorName && tweet.authorHandle) return `${tweet.authorName} (${tweet.authorHandle})`;
+  return tweet.authorName || tweet.authorHandle || "Unknown author";
+}
+
+function renderTweetPreview() {
+  const status = parseTwitterStatusUrl(pageUrl);
+  tweetUrlPreview.textContent = status?.url || pageUrl || "—";
+
+  if (!status) {
+    tweetPreview.textContent = "Open an x.com/twitter.com status page to parse the current tweet.";
+    updateActionState();
+    return;
+  }
+
+  if (!extractedTweet) {
+    tweetPreview.textContent = "Extracting tweet...";
+    updateActionState();
+    return;
+  }
+
+  const lines = [
+    `Tweet ID: ${extractedTweet.tweetId || status.tweetId}`,
+    `Author: ${tweetAuthorLabel(extractedTweet)}`,
+    extractedTweet.createdAt ? `Created: ${extractedTweet.createdAt}` : "",
+    "",
+    extractedTweet.text || "(No text found)",
+  ];
+
+  if (extractedTweet.media?.length) {
+    lines.push("", `Media: ${extractedTweet.media.length} image${extractedTweet.media.length === 1 ? "" : "s"}`);
+  }
+
+  if (extractedTweet.quotedTweet?.url) {
+    lines.push(
+      "",
+      "Quoted Tweet:",
+      `${tweetAuthorLabel(extractedTweet.quotedTweet) || extractedTweet.quotedTweet.url}`,
+      extractedTweet.quotedTweet.text || extractedTweet.quotedTweet.url,
+    );
+  }
+
+  tweetPreview.textContent = lines.filter(Boolean).join("\n");
+  updateActionState();
+}
+
 function updateActionState() {
   if (!appConnected) {
     clipBtn.disabled = true;
@@ -293,6 +364,13 @@ function updateActionState() {
     paperAddBtn.disabled = !arxivId || !projectSelect.value;
     paperAddBtn.textContent = "➕ Add to Background Queue";
     clipBtn.disabled = true;
+    return;
+  }
+
+  if (currentMode === "tweet") {
+    clipBtn.disabled = !extractedTweet || !projectSelect.value;
+    clipBtn.textContent = "🐦 Save Tweet";
+    paperAddBtn.disabled = true;
     return;
   }
 
@@ -328,8 +406,10 @@ function setMode(mode) {
   currentMode = mode;
   webModeBtn.classList.toggle("active", mode === "web");
   paperModeBtn.classList.toggle("active", mode === "paper");
+  tweetModeBtn.classList.toggle("active", mode === "tweet");
   webFields.classList.toggle("hidden", mode !== "web");
   paperFields.classList.toggle("hidden", mode !== "paper");
+  tweetFields.classList.toggle("hidden", mode !== "tweet");
   clipBtn.classList.toggle("hidden", mode === "paper");
   paperAddBtn.classList.toggle("hidden", mode !== "paper");
 
@@ -338,6 +418,9 @@ function setMode(mode) {
     if (!paperInput.value && currentId) paperInput.value = currentId;
     updatePaperPreview();
     loadPaperQueue();
+  } else if (mode === "tweet") {
+    renderTweetPreview();
+    if (activeTabId) extractTweet();
   } else {
     updateActionState();
     if (activeTabId && !webExtractionStarted) extractContent();
@@ -408,12 +491,137 @@ async function loadCurrentTab() {
   titleInput.value = tab.title || "Untitled";
   urlPreview.textContent = pageUrl;
 
+  const tweetStatus = parseTwitterStatusUrl(pageUrl);
   const arxivId = parseArxivInput(pageUrl);
-  if (arxivId) {
+  if (tweetStatus) {
+    setMode("tweet");
+  } else if (arxivId) {
     paperInput.value = arxivId;
     setMode("paper");
   } else {
     setMode("web");
+  }
+}
+
+async function extractTweet() {
+  if (!activeTabId) return;
+  const status = parseTwitterStatusUrl(pageUrl);
+  if (!status) {
+    extractedTweet = null;
+    renderTweetPreview();
+    return;
+  }
+
+  extractedTweet = null;
+  renderTweetPreview();
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: activeTabId },
+      func: (targetTweetId) => {
+        try {
+          function absoluteUrl(raw) {
+            const value = (raw || "").trim();
+            if (!value) return "";
+            try {
+              return new URL(value, location.href).href;
+            } catch {
+              return "";
+            }
+          }
+
+          function statusIdFromUrl(raw) {
+            const url = absoluteUrl(raw);
+            const match = url.match(/\/status\/(\d+)/);
+            return match ? match[1] : "";
+          }
+
+          function uniqueStrings(values) {
+            return [...new Set(values.filter(Boolean))];
+          }
+
+          function collectAuthor(article, skipFirst = false) {
+            const blocks = Array.from(article.querySelectorAll('div[data-testid="User-Name"]'));
+            const block = skipFirst ? blocks[1] : blocks[0];
+            if (!block) return { authorName: "", authorHandle: "" };
+            const spans = Array.from(block.querySelectorAll("span"))
+              .map((node) => node.textContent?.trim() || "")
+              .filter(Boolean);
+            return {
+              authorName: spans.find((value) => !value.startsWith("@") && value !== "·") || "",
+              authorHandle: spans.find((value) => value.startsWith("@")) || "",
+            };
+          }
+
+          const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+          const mainArticle = articles.find((article) =>
+            Array.from(article.querySelectorAll('a[href*="/status/"]')).some((link) => statusIdFromUrl(link.href) === targetTweetId),
+          );
+
+          if (!mainArticle) {
+            return { error: "Could not find the main tweet on this page." };
+          }
+
+          const statusLinks = uniqueStrings(
+            Array.from(mainArticle.querySelectorAll('a[href*="/status/"]')).map((link) => absoluteUrl(link.href)),
+          );
+          const primaryUrl =
+            statusLinks.find((url) => statusIdFromUrl(url) === targetTweetId) ||
+            absoluteUrl(location.href);
+          const textNodes = Array.from(mainArticle.querySelectorAll('div[data-testid="tweetText"]'))
+            .map((node) => node.innerText.trim())
+            .filter(Boolean);
+          const timeNode = mainArticle.querySelector("time");
+          const media = uniqueStrings(
+            Array.from(mainArticle.querySelectorAll('[data-testid="tweetPhoto"] img'))
+              .map((img) => absoluteUrl(img.getAttribute("src") || img.currentSrc || ""))
+              .filter(Boolean),
+          ).map((url, index) => ({ url, alt: `tweet-image-${index + 1}` }));
+
+          const quoteUrl = statusLinks.find((url) => statusIdFromUrl(url) && statusIdFromUrl(url) !== targetTweetId) || "";
+          const quoteText = textNodes.length > 1 ? textNodes[textNodes.length - 1] : "";
+          const quotedAuthor = quoteUrl ? collectAuthor(mainArticle, true) : { authorName: "", authorHandle: "" };
+
+          return {
+            tweetId: targetTweetId,
+            url: primaryUrl,
+            authorName: collectAuthor(mainArticle).authorName,
+            authorHandle: collectAuthor(mainArticle).authorHandle,
+            createdAt: timeNode?.getAttribute("datetime") || "",
+            text: textNodes[0] || "",
+            media,
+            quotedTweet: quoteUrl
+              ? {
+                  url: quoteUrl,
+                  authorName: quotedAuthor.authorName,
+                  authorHandle: quotedAuthor.authorHandle,
+                  text: quoteText,
+                }
+              : null,
+          };
+        } catch (error) {
+          return {
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
+      args: [status.tweetId],
+    });
+
+    const result = results?.[0]?.result;
+    if (!result) {
+      throw new Error("No tweet data returned from the page");
+    }
+    if (result.error) {
+      throw new Error(result.error);
+    }
+
+    extractedTweet = result;
+    renderTweetPreview();
+  } catch (err) {
+    extractedTweet = null;
+    tweetPreview.textContent = `Tweet extraction failed: ${err.message}`;
+    updateActionState();
   }
 }
 
@@ -938,6 +1146,50 @@ async function sendClip() {
   }
 }
 
+async function sendTweet() {
+  const selectedProject = projectSelect.value;
+  if (!selectedProject) {
+    setStatus("error", "✗ Please select a project");
+    return;
+  }
+
+  const tweetStatus = parseTwitterStatusUrl(pageUrl);
+  if (!tweetStatus || !extractedTweet) {
+    setStatus("error", "✗ Open a tweet status page and wait for it to parse");
+    return;
+  }
+
+  clipBtn.disabled = true;
+  setStatus("sending", "⏳ Sending tweet to LLM Wiki...");
+
+  try {
+    const assets = await downloadClipAssets(extractedTweet.media || []);
+    if (assets.length > 0) setStatus("sending", "⏳ Sending tweet and images to LLM Wiki...");
+    const res = await fetch(`${API_URL}/tweet`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectPath: selectedProject,
+        tweet: extractedTweet,
+        assets,
+      }),
+    });
+
+    const data = await res.json();
+    if (data.ok) {
+      const projectName = projectSelect.options[projectSelect.selectedIndex]?.textContent || "project";
+      setStatus("success", `✓ Saved tweet to ${projectName}`);
+      clipBtn.textContent = "✓ Tweet Saved!";
+    } else {
+      setStatus("error", `✗ Error: ${data.error}`);
+      updateActionState();
+    }
+  } catch (err) {
+    setStatus("error", `✗ Failed to save tweet: ${err.message}`);
+    updateActionState();
+  }
+}
+
 async function queuePaper() {
   const selectedProject = projectSelect.value;
   if (!selectedProject) {
@@ -1009,11 +1261,16 @@ function resizePreview() {
 }
 
 clipBtn.addEventListener("click", () => {
+  if (currentMode === "tweet") {
+    sendTweet();
+    return;
+  }
   sendClip();
 });
 paperAddBtn.addEventListener("click", () => queuePaper());
 webModeBtn.addEventListener("click", () => setMode("web"));
 paperModeBtn.addEventListener("click", () => setMode("paper"));
+tweetModeBtn.addEventListener("click", () => setMode("tweet"));
 paperInput.addEventListener("input", updatePaperPreview);
 paperInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && currentMode === "paper") {

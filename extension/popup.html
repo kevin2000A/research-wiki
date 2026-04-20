@@ -37,7 +37,7 @@
     }
     .mode-toggle {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr 1fr 1fr;
       gap: 6px;
       margin-bottom: 10px;
     }
@@ -312,6 +312,7 @@
     <div class="mode-toggle">
       <button class="mode-btn active" id="webModeBtn" type="button">Web Page</button>
       <button class="mode-btn" id="paperModeBtn" type="button">arXiv Paper</button>
+      <button class="mode-btn" id="tweetModeBtn" type="button">X / Twitter</button>
     </div>
 
     <div class="field">
@@ -385,6 +386,19 @@
 
       <div id="paperQueueList" class="queue-list">
         <div class="queue-empty">No papers queued yet.</div>
+      </div>
+    </div>
+
+    <div id="tweetFields" class="hidden">
+      <div class="field">
+        <label>Tweet URL</label>
+        <div id="tweetUrlPreview" class="url-preview">—</div>
+        <div class="hint">Single status pages only in v1. The extension extracts the main tweet, quoted tweet summary, and images when available.</div>
+      </div>
+
+      <div class="field">
+        <label>Tweet Preview</label>
+        <div id="tweetPreview" class="preview-box">Open a tweet status page to parse the current tweet.</div>
       </div>
     </div>
 
