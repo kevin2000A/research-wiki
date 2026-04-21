@@ -21,6 +21,9 @@ const extensionApi = globalThis.chrome?.runtime
   : globalThis.browser?.runtime
     ? globalThis.browser
     : null;
+const extensionRuntime = extensionApi?.runtime || null;
+const extensionStorage = extensionApi?.storage || null;
+const extensionAlarms = extensionApi?.alarms || null;
 
 let processing = false;
 
@@ -208,9 +211,9 @@ function textToBase64(text) {
 
 function storageGet(key) {
   return new Promise((resolve, reject) => {
-    extensionApi.storage.local.get(key, (result) => {
-      if (extensionApi.runtime.lastError) {
-        reject(new Error(extensionApi.runtime.lastError.message));
+    extensionStorage.local.get(key, (result) => {
+      if (extensionRuntime.lastError) {
+        reject(new Error(extensionRuntime.lastError.message));
         return;
       }
       resolve(result[key]);
@@ -220,9 +223,9 @@ function storageGet(key) {
 
 function storageSet(value) {
   return new Promise((resolve, reject) => {
-    extensionApi.storage.local.set(value, () => {
-      if (extensionApi.runtime.lastError) {
-        reject(new Error(extensionApi.runtime.lastError.message));
+    extensionStorage.local.set(value, () => {
+      if (extensionRuntime.lastError) {
+        reject(new Error(extensionRuntime.lastError.message));
         return;
       }
       resolve();
@@ -235,14 +238,14 @@ async function getJinaSettings() {
 }
 
 function createAlarm(name, when) {
-  extensionApi.alarms.create(name, { when });
+  extensionAlarms.create(name, { when });
   return Promise.resolve();
 }
 
 function sendRuntimeMessage(message) {
   return new Promise((resolve) => {
-    extensionApi.runtime.sendMessage(message, (response) => {
-      if (extensionApi.runtime.lastError) {
+    extensionRuntime.sendMessage(message, (response) => {
+      if (extensionRuntime.lastError) {
         resolve(null);
         return;
       }
@@ -959,8 +962,13 @@ async function processQueue() {
   }
 }
 
-if (extensionApi?.runtime?.onMessage && extensionApi?.alarms?.onAlarm) {
-  extensionApi.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+const runtimeOnMessage = extensionRuntime?.onMessage || null;
+const runtimeOnInstalled = extensionRuntime?.onInstalled || null;
+const runtimeOnStartup = extensionRuntime?.onStartup || null;
+const alarmsOnAlarm = extensionAlarms?.onAlarm || null;
+
+if (runtimeOnMessage?.addListener && alarmsOnAlarm?.addListener) {
+  runtimeOnMessage.addListener((message, _sender, sendResponse) => {
     (async () => {
       if (!message || typeof message.type !== "string") {
         throw new Error("Invalid message");
@@ -1016,20 +1024,20 @@ if (extensionApi?.runtime?.onMessage && extensionApi?.alarms?.onAlarm) {
     return true;
   });
 
-  extensionApi.alarms.onAlarm.addListener((alarm) => {
+  alarmsOnAlarm.addListener((alarm) => {
     if (alarm?.name !== QUEUE_ALARM) return;
     processQueue().catch((error) => {
       console.error("[LLM Wiki Clipper] Failed to process source queue:", error);
     });
   });
 
-  extensionApi.runtime.onInstalled.addListener(() => {
+  runtimeOnInstalled?.addListener(() => {
     resetInterruptedTasks().catch((error) => {
       console.error("[LLM Wiki Clipper] Failed to reset queue on install:", error);
     });
   });
 
-  extensionApi.runtime.onStartup.addListener(() => {
+  runtimeOnStartup?.addListener(() => {
     resetInterruptedTasks().catch((error) => {
       console.error("[LLM Wiki Clipper] Failed to reset queue on startup:", error);
     });
