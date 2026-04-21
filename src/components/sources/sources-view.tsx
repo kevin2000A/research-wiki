@@ -4,7 +4,6 @@ import { open } from "@tauri-apps/plugin-dialog"
 import { invoke } from "@tauri-apps/api/core"
 import { Plus, FileText, RefreshCw, BookOpen, Trash2, Folder, ChevronRight, ChevronDown } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { useWikiStore } from "@/stores/wiki-store"
 import { copyFile, listDirectory, readFile, writeFile, deleteFile, findRelatedWikiPages, preprocessFile } from "@/commands/fs"
 import type { FileNode } from "@/types/wiki"
@@ -288,14 +287,22 @@ export function SourcesView() {
     }
   }
 
-  function handleToggleSelectAll() {
-    if (selectedCount === sourceFiles.length) {
-      setSelectedPaths(new Set())
-      setLastSelectedPath(null)
-      return
-    }
+  function selectAllSources() {
     setSelectedPaths(new Set(sourceFiles.map((node) => node.path)))
     setLastSelectedPath(sourceFiles[0]?.path ?? null)
+  }
+
+  function clearSourceSelection() {
+    setSelectedPaths(new Set())
+    setLastSelectedPath(null)
+  }
+
+  function handleToggleSelectAll() {
+    if (selectedCount === sourceFiles.length) {
+      clearSourceSelection()
+      return
+    }
+    selectAllSources()
   }
 
   async function handleBatchIngest() {
@@ -325,9 +332,36 @@ export function SourcesView() {
     .length
   const allSelected = sourceFiles.length > 0 && selectedCount === sourceFiles.length
 
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (isEditableShortcutTarget(event.target)) return
+
+      const key = event.key.toLowerCase()
+      if ((event.metaKey || event.ctrlKey) && key === "a") {
+        event.preventDefault()
+        selectAllSources()
+        return
+      }
+
+      if (event.key === "Escape" && selectedCount > 0) {
+        event.preventDefault()
+        clearSourceSelection()
+        return
+      }
+
+      if ((event.key === "Delete" || event.key === "Backspace") && selectedCount > 0) {
+        event.preventDefault()
+        void handleDeleteSelected()
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [sourceFiles, selectedPaths, selectedCount, batchDeleting, project])
+
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center justify-between border-b px-4 py-3">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 items-center justify-between border-b px-4 py-3">
         <h2 className="text-sm font-semibold">{t("sources.title")}</h2>
         <div className="flex gap-1">
           <Button variant="ghost" size="icon" onClick={loadSources} title="Refresh">
@@ -361,7 +395,11 @@ export function SourcesView() {
         </div>
       </div>
 
-      <ScrollArea className="flex-1">
+      <div
+        className="min-h-0 flex-1 overflow-y-scroll overscroll-contain outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        style={{ scrollbarGutter: "stable" }}
+        tabIndex={0}
+      >
         {sources.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-3 p-8 text-center text-sm text-muted-foreground">
             <p>{t("sources.noSources")}</p>
@@ -390,9 +428,9 @@ export function SourcesView() {
             />
           </div>
         )}
-      </ScrollArea>
+      </div>
 
-      <div className="border-t px-4 py-2 text-xs text-muted-foreground">
+      <div className="shrink-0 border-t px-4 py-2 text-xs text-muted-foreground">
         {t("sources.sourceCount", { count: countFiles(sources) })}
         {selectedCount > 0 && (
           <span className="ml-2">· {t("sources.selectedCount", { count: selectedCount })}</span>
@@ -758,6 +796,12 @@ function sortSourceNodes(nodes: FileNode[]): FileNode[] {
     if (!a.is_dir && b.is_dir) return 1
     return a.name.localeCompare(b.name)
   })
+}
+
+function isEditableShortcutTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  if (target.isContentEditable) return true
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)
 }
 
 function isIngestableSource(node: FileNode): boolean {
