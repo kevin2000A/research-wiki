@@ -625,7 +625,7 @@ async function processBlogTask(task) {
 
   await updateTask(task.id, (item) => {
     item.status = "fetching";
-    item.statusText = "Downloading Markdown from Jina Reader";
+    item.statusText = "Downloading Markdown from Jina Reader only";
     item.error = "";
     item.attemptCount += 1;
   });
