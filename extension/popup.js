@@ -184,8 +184,11 @@ function parseTwitterStatusUrl(value) {
 }
 
 function normalizeBlogUrl(value) {
-  const text = (value || "").trim();
+  let text = (value || "").trim();
   if (!text) return "";
+  if (text.startsWith(JINA_READER_PREFIX)) {
+    text = decodeURIComponent(text.slice(JINA_READER_PREFIX.length));
+  }
   try {
     const url = new URL(text);
     if (url.protocol !== "http:" && url.protocol !== "https:") return "";

@@ -38,8 +38,11 @@ function sanitizeFileStem(value) {
 }
 
 function normalizeBlogUrl(value) {
-  const text = (value || "").trim();
+  let text = (value || "").trim();
   if (!text) return "";
+  if (text.startsWith(JINA_READER_PREFIX)) {
+    text = decodeURIComponent(text.slice(JINA_READER_PREFIX.length));
+  }
   try {
     const url = new URL(text);
     if (url.protocol !== "http:" && url.protocol !== "https:") return "";
@@ -529,6 +532,13 @@ function parseJinaReaderMarkdown(markdown, fallbackTitle) {
   };
 }
 
+function jinaReaderErrorLine(markdown) {
+  return markdown
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("Warning: Target URL returned error") || line.startsWith("Error:"));
+}
+
 async function fetchJinaBlogMarkdown(task) {
   const readerUrl = jinaReaderUrl(task.blog.url);
   const jinaSettings = await getJinaSettings();
@@ -538,20 +548,45 @@ async function fetchJinaBlogMarkdown(task) {
       ? jinaSettings.apiKey
       : `Bearer ${jinaSettings.apiKey}`;
   }
-  const response = await fetch(readerUrl, { method: "GET", redirect: "follow", headers });
+  let response;
+  try {
+    response = await fetch(readerUrl, { method: "GET", redirect: "follow", headers });
+  } catch (err) {
+    throw new Error(`Jina Reader fetch failed for ${readerUrl}: ${err.message}`);
+  }
   if (!response.ok) {
-    if (!jinaSettings.apiKey && [401, 403, 429, 451].includes(response.status)) {
-      throw new Error(`Jina Reader HTTP ${response.status}; configure a Jina API key in Blog settings and retry`);
+    const bodyText = await response.text();
+    let detail = "";
+    try {
+      const bodyJson = JSON.parse(bodyText);
+      detail = bodyJson?.readableMessage || bodyJson?.message || "";
+    } catch {
+      detail = bodyText.trim().slice(0, 240);
     }
-    throw new Error(`Jina Reader HTTP ${response.status}`);
+    const suffix = detail ? `: ${detail}` : "";
+    if (!jinaSettings.apiKey && [401, 403, 429, 451].includes(response.status)) {
+      throw new Error(`Jina Reader HTTP ${response.status}${suffix}; configure a Jina API key in Blog settings and retry`);
+    }
+    throw new Error(`Jina Reader HTTP ${response.status}${suffix}`);
   }
   const markdown = await response.text();
   if (!markdown.trim()) {
     throw new Error("Jina Reader markdown was empty");
   }
+  const errorLine = jinaReaderErrorLine(markdown);
+  if (errorLine) {
+    if (!jinaSettings.apiKey) {
+      throw new Error(`${errorLine}; configure a Jina API key in Blog settings and retry`);
+    }
+    throw new Error(errorLine);
+  }
+  const parsed = parseJinaReaderMarkdown(markdown, task.blog.title);
+  if (!parsed.content.trim()) {
+    throw new Error("Jina Reader markdown content was empty");
+  }
   return {
     readerUrl,
-    ...parseJinaReaderMarkdown(markdown, task.blog.title),
+    ...parsed,
   };
 }
 
