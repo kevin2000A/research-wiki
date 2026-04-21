@@ -585,13 +585,7 @@ function parseJinaEventStream(text) {
       throw new Error(eventText(value) || rawData);
     }
     const chunk = eventText(value);
-    if (!chunk) return;
-    const previous = chunks.length > 0 ? chunks[chunks.length - 1] : "";
-    if (previous && chunk.startsWith(previous)) {
-      chunks[chunks.length - 1] = chunk;
-      return;
-    }
-    chunks.push(chunk);
+    if (chunk) chunks.push(chunk);
   }
 
   for (const line of text.split(/\r?\n/)) {
@@ -606,7 +600,7 @@ function parseJinaEventStream(text) {
   }
   flushEvent();
 
-  return chunks.join("\n");
+  return chunks.join("");
 }
 
 function jinaErrorDetail(bodyText) {
