@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useMemo } from "react"
+import type { MouseEvent } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
 import { invoke } from "@tauri-apps/api/core"
 import { Plus, FileText, RefreshCw, BookOpen, Trash2, Folder, ChevronRight, ChevronDown } from "lucide-react"
@@ -10,6 +11,7 @@ import type { FileNode } from "@/types/wiki"
 import { enqueueIngest, enqueueBatch } from "@/lib/ingest-queue"
 import { useTranslation } from "react-i18next"
 import { normalizePath, getFileName } from "@/lib/path-utils"
+import { cn } from "@/lib/utils"
 
 export function SourcesView() {
   const { t } = useTranslation()
@@ -23,7 +25,10 @@ export function SourcesView() {
   const [importing, setImporting] = useState(false)
   const [queueingPath, setQueueingPath] = useState<string | null>(null)
   const [batchQueueing, setBatchQueueing] = useState(false)
+  const [batchDeleting, setBatchDeleting] = useState(false)
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set())
+  const [lastSelectedPath, setLastSelectedPath] = useState<string | null>(null)
+  const sourceFiles = useMemo(() => flattenSourceFiles(sources), [sources])
 
   const loadSources = useCallback(async () => {
     if (!project) return
@@ -35,9 +40,11 @@ export function SourcesView() {
       setSources(filtered)
       const files = new Set(flattenSourceFiles(filtered).map((f) => f.path))
       setSelectedPaths((prev) => new Set([...prev].filter((path) => files.has(path))))
+      setLastSelectedPath((prev) => (prev && files.has(prev) ? prev : null))
     } catch {
       setSources([])
       setSelectedPaths(new Set())
+      setLastSelectedPath(null)
     }
   }, [project])
 
@@ -153,6 +160,13 @@ export function SourcesView() {
     }
   }
 
+  async function refreshSourceState(pp: string) {
+    await loadSources()
+    const tree = await listDirectory(pp)
+    setFileTree(tree)
+    useWikiStore.getState().bumpDataVersion()
+  }
+
   async function handleDelete(node: FileNode) {
     if (!project) return
     const pp = normalizePath(project.path)
@@ -163,135 +177,16 @@ export function SourcesView() {
     if (!confirmed) return
 
     try {
-      // Step 1: Find related wiki pages before deleting
-      const relatedPages = await findRelatedWikiPages(pp, fileName)
-      const deletedSlugs = relatedPages.map((p) => {
-        const name = getFileName(p).replace(".md", "")
-        return name
-      }).filter(Boolean)
-
-      // Step 2: Delete the source file
-      await deleteFile(node.path)
-
-      // Delete hidden companion artifacts for arXiv paper bundles
-      for (const companion of hiddenPaperCompanionArtifacts(node)) {
-        try {
-          await deleteFile(companion.path)
-        } catch {
-          // companion may not exist
-        }
-        try {
-          await deleteFile(`${pp}/raw/sources/.cache/${companion.name}.txt`)
-        } catch {
-          // cache file may not exist
-        }
+      const actuallyDeleted = await deleteSourceNode(pp, node)
+      await refreshSourceState(pp)
+      setSelectedPaths((prev) => {
+        const next = new Set(prev)
+        next.delete(node.path)
+        return next
+      })
+      if (lastSelectedPath === node.path) {
+        setLastSelectedPath(null)
       }
-
-      // Step 3: Delete preprocessed cache
-      try {
-        await deleteFile(`${pp}/raw/sources/.cache/${fileName}.txt`)
-      } catch {
-        // cache file may not exist
-      }
-
-      // Step 4: Delete or update related wiki pages
-      // If a page has multiple sources, only remove this filename from sources[]; don't delete the page
-      const actuallyDeleted: string[] = []
-      for (const pagePath of relatedPages) {
-        try {
-          const content = await readFile(pagePath)
-          // Parse sources from frontmatter
-          const sourcesMatch = content.match(/^sources:\s*\[([^\]]*)\]/m)
-          if (sourcesMatch) {
-            const sourcesList = sourcesMatch[1]
-              .split(",")
-              .map((s) => s.trim().replace(/["']/g, ""))
-              .filter((s) => s.length > 0)
-
-            if (sourcesList.length > 1) {
-              // Multiple sources — just remove this file from the list, keep the page
-              const updatedSources = sourcesList.filter(
-                (s) => s.toLowerCase() !== fileName.toLowerCase()
-              )
-              const updatedContent = content.replace(
-                /^sources:\s*\[([^\]]*)\]/m,
-                `sources: [${updatedSources.map((s) => `"${s}"`).join(", ")}]`
-              )
-              await writeFile(pagePath, updatedContent)
-              continue // Don't delete this page
-            }
-          }
-
-          // Single source or no sources field — delete the page
-          await deleteFile(pagePath)
-          actuallyDeleted.push(pagePath)
-        } catch (err) {
-          console.error(`Failed to process wiki page ${pagePath}:`, err)
-        }
-      }
-
-      // Step 5: Clean index.md — remove entries for actually deleted pages only
-      const deletedPageSlugs = actuallyDeleted.map((p) => {
-        const name = getFileName(p).replace(".md", "")
-        return name
-      }).filter(Boolean)
-
-      if (deletedPageSlugs.length > 0) {
-        try {
-          const indexPath = `${pp}/wiki/index.md`
-          const indexContent = await readFile(indexPath)
-          const updatedIndex = indexContent
-            .split("\n")
-            .filter((line) => !deletedPageSlugs.some((slug) => line.toLowerCase().includes(slug.toLowerCase())))
-            .join("\n")
-          await writeFile(indexPath, updatedIndex)
-        } catch {
-          // non-critical
-        }
-      }
-
-      // Step 6: Clean [[wikilinks]] to deleted pages from remaining wiki files
-      if (deletedPageSlugs.length > 0) {
-        try {
-          const wikiTree = await listDirectory(`${pp}/wiki`)
-          const allMdFiles = flattenMdFiles(wikiTree)
-          for (const file of allMdFiles) {
-            try {
-              const content = await readFile(file.path)
-              let updated = content
-              for (const slug of deletedPageSlugs) {
-                const linkRegex = new RegExp(`\\[\\[${slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\|([^\\]]+))?\\]\\]`, "gi")
-                updated = updated.replace(linkRegex, (_match, displayText) => displayText || slug)
-              }
-              if (updated !== content) {
-                await writeFile(file.path, updated)
-              }
-            } catch {
-              // skip
-            }
-          }
-        } catch {
-          // non-critical
-        }
-      }
-
-      // Step 7: Append deletion record to log.md
-      try {
-        const logPath = `${pp}/wiki/log.md`
-        const logContent = await readFile(logPath).catch(() => "# Wiki Log\n")
-        const date = new Date().toISOString().slice(0, 10)
-        const keptCount = relatedPages.length - actuallyDeleted.length
-        const logEntry = `\n## [${date}] delete | ${fileName}\n\nDeleted source file and ${actuallyDeleted.length} wiki pages.${keptCount > 0 ? ` ${keptCount} shared pages kept (have other sources).` : ""}\n`
-        await writeFile(logPath, logContent.trimEnd() + logEntry)
-      } catch {
-        // non-critical
-      }
-
-      // Step 8: Refresh everything
-      await loadSources()
-      const tree = await listDirectory(pp)
-      setFileTree(tree)
-      useWikiStore.getState().bumpDataVersion()
 
       // Clear selected file if it was the deleted one
       if (selectedFile === node.path || actuallyDeleted.includes(selectedFile ?? "")) {
@@ -300,6 +195,40 @@ export function SourcesView() {
     } catch (err) {
       console.error("Failed to delete source:", err)
       window.alert(`Failed to delete: ${err}`)
+    }
+  }
+
+  async function handleDeleteSelected() {
+    if (!project || batchDeleting) return
+    const selected = sourceFiles.filter((node) => selectedPaths.has(node.path))
+    if (selected.length === 0) return
+
+    const confirmed = window.confirm(
+      t("sources.deleteSelectedConfirm", { count: selected.length })
+    )
+    if (!confirmed) return
+
+    setBatchDeleting(true)
+    try {
+      const pp = normalizePath(project.path)
+      const deletedSourcePaths = new Set(selected.map((node) => node.path))
+      const deletedWikiPaths: string[] = []
+      for (const node of selected) {
+        deletedWikiPaths.push(...await deleteSourceNode(pp, node))
+      }
+
+      await refreshSourceState(pp)
+      setSelectedPaths(new Set())
+      setLastSelectedPath(null)
+
+      if (selectedFile && (deletedSourcePaths.has(selectedFile) || deletedWikiPaths.includes(selectedFile))) {
+        setSelectedFile(null)
+      }
+    } catch (err) {
+      console.error("Failed to delete selected sources:", err)
+      window.alert(`Failed to delete selected sources: ${err}`)
+    } finally {
+      setBatchDeleting(false)
     }
   }
 
@@ -321,26 +250,58 @@ export function SourcesView() {
     }
   }
 
-  function handleToggleSelected(path: string, selected: boolean) {
-    setSelectedPaths((prev) => {
-      const next = new Set(prev)
-      if (selected) next.add(path)
-      else next.delete(path)
-      return next
-    })
+  function handleSelectSource(node: FileNode, event: MouseEvent<HTMLElement>, openFile: boolean) {
+    const isRangeSelect = event.shiftKey && lastSelectedPath
+    const isToggleSelect = event.metaKey || event.ctrlKey
+
+    if (isRangeSelect) {
+      const anchorIndex = sourceFiles.findIndex((file) => file.path === lastSelectedPath)
+      const currentIndex = sourceFiles.findIndex((file) => file.path === node.path)
+      if (anchorIndex >= 0 && currentIndex >= 0) {
+        const start = Math.min(anchorIndex, currentIndex)
+        const end = Math.max(anchorIndex, currentIndex)
+        setSelectedPaths((prev) => {
+          const next = new Set(prev)
+          for (const file of sourceFiles.slice(start, end + 1)) {
+            next.add(file.path)
+          }
+          return next
+        })
+      } else {
+        setSelectedPaths(new Set([node.path]))
+      }
+    } else if (isToggleSelect) {
+      setSelectedPaths((prev) => {
+        const next = new Set(prev)
+        if (next.has(node.path)) next.delete(node.path)
+        else next.add(node.path)
+        return next
+      })
+    } else {
+      setSelectedPaths(new Set([node.path]))
+    }
+
+    setLastSelectedPath(node.path)
+
+    if (openFile && !isRangeSelect && !isToggleSelect) {
+      void handleOpenSource(node)
+    }
   }
 
-  function handleSelectAllIngestable() {
-    const paths = flattenSourceFiles(sources)
-      .filter(isIngestableSource)
-      .map((node) => node.path)
-    setSelectedPaths(new Set(paths))
+  function handleToggleSelectAll() {
+    if (selectedCount === sourceFiles.length) {
+      setSelectedPaths(new Set())
+      setLastSelectedPath(null)
+      return
+    }
+    setSelectedPaths(new Set(sourceFiles.map((node) => node.path)))
+    setLastSelectedPath(sourceFiles[0]?.path ?? null)
   }
 
   async function handleBatchIngest() {
     if (!project || batchQueueing) return
     const pp = normalizePath(project.path)
-    const selected = flattenSourceFiles(sources)
+    const selected = sourceFiles
       .filter((node) => selectedPaths.has(node.path) && isIngestableSource(node))
     if (selected.length === 0) return
 
@@ -358,10 +319,11 @@ export function SourcesView() {
     }
   }
 
-  const selectedIngestableCount = flattenSourceFiles(sources)
+  const selectedCount = sourceFiles.filter((node) => selectedPaths.has(node.path)).length
+  const selectedIngestableCount = sourceFiles
     .filter((node) => selectedPaths.has(node.path) && isIngestableSource(node))
     .length
-  const ingestableCount = flattenSourceFiles(sources).filter(isIngestableSource).length
+  const allSelected = sourceFiles.length > 0 && selectedCount === sourceFiles.length
 
   return (
     <div className="flex h-full flex-col">
@@ -371,8 +333,18 @@ export function SourcesView() {
           <Button variant="ghost" size="icon" onClick={loadSources} title="Refresh">
             <RefreshCw className="h-4 w-4" />
           </Button>
-          <Button variant="outline" size="sm" onClick={handleSelectAllIngestable} disabled={ingestableCount === 0}>
-            {t("sources.selectAllIngestable")}
+          <Button variant="outline" size="sm" onClick={handleToggleSelectAll} disabled={sourceFiles.length === 0}>
+            {allSelected ? t("sources.clearSelection") : t("sources.selectAll")}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleDeleteSelected}
+            disabled={batchDeleting || selectedCount === 0}
+            className="text-destructive hover:text-destructive"
+          >
+            <Trash2 className="mr-1 h-4 w-4" />
+            {batchDeleting ? t("sources.deleting") : t("sources.deleteSelected", { count: selectedCount })}
           </Button>
           <Button size="sm" onClick={handleBatchIngest} disabled={batchQueueing || selectedIngestableCount === 0}>
             <BookOpen className="mr-1 h-4 w-4" />
@@ -409,10 +381,9 @@ export function SourcesView() {
           <div className="p-2">
             <SourceTree
               nodes={sources}
-              onOpen={handleOpenSource}
+              onSelect={handleSelectSource}
               onIngest={handleIngest}
               onDelete={handleDelete}
-              onToggleSelected={handleToggleSelected}
               selectedPaths={selectedPaths}
               queueingPath={queueingPath}
               depth={0}
@@ -423,8 +394,11 @@ export function SourcesView() {
 
       <div className="border-t px-4 py-2 text-xs text-muted-foreground">
         {t("sources.sourceCount", { count: countFiles(sources) })}
-        {selectedIngestableCount > 0 && (
-          <span className="ml-2">· {t("sources.selectedCount", { count: selectedIngestableCount })}</span>
+        {selectedCount > 0 && (
+          <span className="ml-2">· {t("sources.selectedCount", { count: selectedCount })}</span>
+        )}
+        {selectedIngestableCount > 0 && selectedIngestableCount !== selectedCount && (
+          <span className="ml-2">· {t("sources.selectedIngestableCount", { count: selectedIngestableCount })}</span>
         )}
       </div>
     </div>
@@ -534,21 +508,132 @@ function countFiles(nodes: FileNode[]): number {
   return count
 }
 
+async function deleteSourceNode(projectPath: string, node: FileNode): Promise<string[]> {
+  const fileName = node.name
+  const relatedPages = await findRelatedWikiPages(projectPath, fileName)
+
+  await deleteFile(node.path)
+
+  for (const companion of hiddenPaperCompanionArtifacts(node)) {
+    try {
+      await deleteFile(companion.path)
+    } catch {
+      // companion may not exist
+    }
+    try {
+      await deleteFile(`${projectPath}/raw/sources/.cache/${companion.name}.txt`)
+    } catch {
+      // cache file may not exist
+    }
+  }
+
+  try {
+    await deleteFile(`${projectPath}/raw/sources/.cache/${fileName}.txt`)
+  } catch {
+    // cache file may not exist
+  }
+
+  const actuallyDeleted: string[] = []
+  for (const pagePath of relatedPages) {
+    try {
+      const content = await readFile(pagePath)
+      const sourcesMatch = content.match(/^sources:\s*\[([^\]]*)\]/m)
+      if (sourcesMatch) {
+        const sourcesList = sourcesMatch[1]
+          .split(",")
+          .map((s) => s.trim().replace(/["']/g, ""))
+          .filter((s) => s.length > 0)
+
+        if (sourcesList.length > 1) {
+          const updatedSources = sourcesList.filter(
+            (s) => s.toLowerCase() !== fileName.toLowerCase()
+          )
+          const updatedContent = content.replace(
+            /^sources:\s*\[([^\]]*)\]/m,
+            `sources: [${updatedSources.map((s) => `"${s}"`).join(", ")}]`
+          )
+          await writeFile(pagePath, updatedContent)
+          continue
+        }
+      }
+
+      await deleteFile(pagePath)
+      actuallyDeleted.push(pagePath)
+    } catch (err) {
+      console.error(`Failed to process wiki page ${pagePath}:`, err)
+    }
+  }
+
+  const deletedPageSlugs = actuallyDeleted.map((p) => {
+    const name = getFileName(p).replace(".md", "")
+    return name
+  }).filter(Boolean)
+
+  if (deletedPageSlugs.length > 0) {
+    try {
+      const indexPath = `${projectPath}/wiki/index.md`
+      const indexContent = await readFile(indexPath)
+      const updatedIndex = indexContent
+        .split("\n")
+        .filter((line) => !deletedPageSlugs.some((slug) => line.toLowerCase().includes(slug.toLowerCase())))
+        .join("\n")
+      await writeFile(indexPath, updatedIndex)
+    } catch {
+      // non-critical
+    }
+  }
+
+  if (deletedPageSlugs.length > 0) {
+    try {
+      const wikiTree = await listDirectory(`${projectPath}/wiki`)
+      const allMdFiles = flattenMdFiles(wikiTree)
+      for (const file of allMdFiles) {
+        try {
+          const content = await readFile(file.path)
+          let updated = content
+          for (const slug of deletedPageSlugs) {
+            const linkRegex = new RegExp(`\\[\\[${slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\|([^\\]]+))?\\]\\]`, "gi")
+            updated = updated.replace(linkRegex, (_match, displayText) => displayText || slug)
+          }
+          if (updated !== content) {
+            await writeFile(file.path, updated)
+          }
+        } catch {
+          // skip
+        }
+      }
+    } catch {
+      // non-critical
+    }
+  }
+
+  try {
+    const logPath = `${projectPath}/wiki/log.md`
+    const logContent = await readFile(logPath).catch(() => "# Wiki Log\n")
+    const date = new Date().toISOString().slice(0, 10)
+    const keptCount = relatedPages.length - actuallyDeleted.length
+    const logEntry = `\n## [${date}] delete | ${fileName}\n\nDeleted source file and ${actuallyDeleted.length} wiki pages.${keptCount > 0 ? ` ${keptCount} shared pages kept (have other sources).` : ""}\n`
+    await writeFile(logPath, logContent.trimEnd() + logEntry)
+  } catch {
+    // non-critical
+  }
+
+  return actuallyDeleted
+}
+
 function SourceTree({
   nodes,
-  onOpen,
+  onSelect,
   onIngest,
   onDelete,
-  onToggleSelected,
   selectedPaths,
   queueingPath,
   depth,
 }: {
   nodes: FileNode[]
-  onOpen: (node: FileNode) => void
+  onSelect: (node: FileNode, event: MouseEvent<HTMLElement>, openFile: boolean) => void
   onIngest: (node: FileNode) => void
   onDelete: (node: FileNode) => void
-  onToggleSelected: (path: string, selected: boolean) => void
   selectedPaths: Set<string>
   queueingPath: string | null
   depth: number
@@ -559,12 +644,7 @@ function SourceTree({
     setCollapsed((prev) => ({ ...prev, [path]: !prev[path] }))
   }
 
-  // Sort: folders first, then files, alphabetical within each group
-  const sorted = [...nodes].sort((a, b) => {
-    if (a.is_dir && !b.is_dir) return -1
-    if (!a.is_dir && b.is_dir) return 1
-    return a.name.localeCompare(b.name)
-  })
+  const sorted = sortSourceNodes(nodes)
 
   return (
     <>
@@ -592,10 +672,9 @@ function SourceTree({
               {!isCollapsed && (
                 <SourceTree
                   nodes={node.children}
-                  onOpen={onOpen}
+                  onSelect={onSelect}
                   onIngest={onIngest}
                   onDelete={onDelete}
-                  onToggleSelected={onToggleSelected}
                   selectedPaths={selectedPaths}
                   queueingPath={queueingPath}
                   depth={depth + 1}
@@ -606,23 +685,30 @@ function SourceTree({
         }
 
         const ingestable = isIngestableSource(node)
+        const selected = selectedPaths.has(node.path)
 
         return (
           <div
             key={node.path}
-            className="flex w-full items-center gap-1 rounded-md px-1 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+            className={cn(
+              "flex w-full items-center gap-1 rounded-md px-1 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
+              selected && "bg-accent text-accent-foreground"
+            )}
             style={{ paddingLeft: `${depth * 16 + 4}px` }}
           >
             <input
               type="checkbox"
               className="ml-1 h-3.5 w-3.5 shrink-0 accent-primary"
-              checked={selectedPaths.has(node.path)}
-              disabled={!ingestable}
-              title={ingestable ? "Select for batch ingest" : "Not ingestable"}
-              onChange={(e) => onToggleSelected(node.path, e.currentTarget.checked)}
+              checked={selected}
+              readOnly
+              title="Select source"
+              onClick={(e) => {
+                e.stopPropagation()
+                onSelect(node, e, false)
+              }}
             />
             <button
-              onClick={() => onOpen(node)}
+              onClick={(e) => onSelect(node, e, true)}
               className="flex flex-1 items-center gap-2 truncate px-2 py-1 text-left"
             >
               <FileText className="h-4 w-4 shrink-0" />
@@ -656,7 +742,7 @@ function SourceTree({
 
 function flattenSourceFiles(nodes: FileNode[]): FileNode[] {
   const files: FileNode[] = []
-  for (const node of nodes) {
+  for (const node of sortSourceNodes(nodes)) {
     if (node.is_dir && node.children) {
       files.push(...flattenSourceFiles(node.children))
     } else if (!node.is_dir) {
@@ -664,6 +750,14 @@ function flattenSourceFiles(nodes: FileNode[]): FileNode[] {
     }
   }
   return files
+}
+
+function sortSourceNodes(nodes: FileNode[]): FileNode[] {
+  return [...nodes].sort((a, b) => {
+    if (a.is_dir && !b.is_dir) return -1
+    if (!a.is_dir && b.is_dir) return 1
+    return a.name.localeCompare(b.name)
+  })
 }
 
 function isIngestableSource(node: FileNode): boolean {
