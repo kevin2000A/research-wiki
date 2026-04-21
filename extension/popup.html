@@ -162,6 +162,20 @@
       margin: 0;
       cursor: pointer;
     }
+    .settings-input {
+      width: 100%;
+      padding: 6px 8px;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: inherit;
+      outline: none;
+      background: white;
+    }
+    .settings-actions {
+      display: flex;
+      gap: 6px;
+    }
     .queue-toolbar {
       display: flex;
       align-items: center;
@@ -350,6 +364,21 @@
         <label>Jina Reader</label>
         <div id="blogReaderPreview" class="url-preview">—</div>
       </div>
+
+      <details id="jinaSettingsPanel" class="settings-panel">
+        <summary>
+          <span>Jina Settings</span>
+          <span id="jinaSettingsSummary" class="settings-summary">api key: unset</span>
+        </summary>
+        <div class="settings-body">
+          <input type="password" id="jinaApiKeyInput" class="settings-input" placeholder="Jina API key">
+          <div class="settings-actions">
+            <button class="mini-btn" id="saveJinaSettingsBtn" type="button">Save Key</button>
+            <button class="mini-btn" id="clearJinaSettingsBtn" type="button">Clear</button>
+          </div>
+          <div class="hint">Stored in Chrome extension local storage and sent as Authorization: Bearer only when the Blog queue fetches Jina Reader.</div>
+        </div>
+      </details>
 
       <button class="btn btn-primary paper-action-btn" id="blogAddBtn" type="button" disabled>
         ➕ Add Blog to Background Queue

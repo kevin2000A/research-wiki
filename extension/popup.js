@@ -2,6 +2,7 @@ const API_URL = "http://127.0.0.1:19827";
 const ARXIV2MD_MARKDOWN_API = "https://arxiv2md.org/api/markdown";
 const ARXIV2MD_METADATA_API = "https://arxiv2md.org/api/json";
 const JINA_READER_PREFIX = "https://r.jina.ai/";
+const JINA_SETTINGS_KEY = "llmWikiJinaSettingsV1";
 
 const statusBar = document.getElementById("statusBar");
 const titleInput = document.getElementById("titleInput");
@@ -20,6 +21,10 @@ const arxivFields = document.getElementById("arxivFields");
 const tweetFields = document.getElementById("tweetFields");
 const blogUrlInput = document.getElementById("blogUrlInput");
 const blogReaderPreview = document.getElementById("blogReaderPreview");
+const jinaSettingsSummary = document.getElementById("jinaSettingsSummary");
+const jinaApiKeyInput = document.getElementById("jinaApiKeyInput");
+const saveJinaSettingsBtn = document.getElementById("saveJinaSettingsBtn");
+const clearJinaSettingsBtn = document.getElementById("clearJinaSettingsBtn");
 const paperInput = document.getElementById("paperInput");
 const paperPreview = document.getElementById("paperPreview");
 const sourceTypePreview = document.getElementById("sourceTypePreview");
@@ -48,6 +53,7 @@ let queueTasks = [];
 let queueStateVersion = 0;
 let queueLoadRequestId = 0;
 let extractedTweet = null;
+let currentJinaSettings = { apiKey: "" };
 const ARXIV_SETTINGS_KEY = "llmWikiArxiv2mdSettingsV1";
 const DEFAULT_ARXIV_SETTINGS = {
   removeRefs: false,
@@ -61,6 +67,12 @@ function normalizeArxivSettings(value) {
     removeRefs: Boolean(value?.removeRefs),
     removeToc: Boolean(value?.removeToc),
     removeCitations: Boolean(value?.removeCitations),
+  };
+}
+
+function normalizeJinaSettings(value) {
+  return {
+    apiKey: typeof value?.apiKey === "string" ? value.apiKey.trim() : "",
   };
 }
 
@@ -86,6 +98,24 @@ function storageSet(value) {
       resolve();
     });
   });
+}
+
+function syncJinaSettingsInputs() {
+  jinaApiKeyInput.value = currentJinaSettings.apiKey;
+  jinaSettingsSummary.textContent = `api key: ${currentJinaSettings.apiKey ? "set" : "unset"}`;
+  clearJinaSettingsBtn.disabled = !currentJinaSettings.apiKey;
+}
+
+async function loadJinaSettings() {
+  const stored = await storageGet(JINA_SETTINGS_KEY);
+  currentJinaSettings = normalizeJinaSettings(stored || {});
+  syncJinaSettingsInputs();
+}
+
+async function persistJinaSettings() {
+  currentJinaSettings = normalizeJinaSettings({ apiKey: jinaApiKeyInput.value });
+  await storageSet({ [JINA_SETTINGS_KEY]: currentJinaSettings });
+  syncJinaSettingsInputs();
 }
 
 function syncArxivSettingsInputs() {
@@ -1629,6 +1659,23 @@ blogUrlInput.addEventListener("keydown", (event) => {
     queueBlogSource();
   }
 });
+saveJinaSettingsBtn.addEventListener("click", async () => {
+  try {
+    await persistJinaSettings();
+    setStatus("success", "✓ Saved Jina API key");
+  } catch (err) {
+    setStatus("error", `✗ Failed to save Jina settings: ${err.message}`);
+  }
+});
+clearJinaSettingsBtn.addEventListener("click", async () => {
+  jinaApiKeyInput.value = "";
+  try {
+    await persistJinaSettings();
+    setStatus("success", "✓ Cleared Jina API key");
+  } catch (err) {
+    setStatus("error", `✗ Failed to clear Jina settings: ${err.message}`);
+  }
+});
 paperInput.addEventListener("input", () => {
   if (currentMode !== "source") return;
   setSourceKind("arxiv");
@@ -1673,6 +1720,7 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 (async () => {
+  await loadJinaSettings();
   await loadArxivSettings();
   await checkConnection();
   await loadCurrentTab();

@@ -2,6 +2,7 @@ const API_URL = "http://127.0.0.1:19827";
 const ARXIV2MD_MARKDOWN_API = "https://arxiv2md.org/api/markdown";
 const ARXIV2MD_METADATA_API = "https://arxiv2md.org/api/json";
 const JINA_READER_PREFIX = "https://r.jina.ai/";
+const JINA_SETTINGS_KEY = "llmWikiJinaSettingsV1";
 const QUEUE_STORAGE_KEY = "llmWikiPaperQueueV1";
 const QUEUE_ALARM = "llmWikiPaperQueueTick";
 const DEFAULT_ARXIV_SETTINGS = {
@@ -122,6 +123,12 @@ function normalizeBlogSnapshot(value) {
   };
 }
 
+function normalizeJinaSettings(value) {
+  return {
+    apiKey: typeof value?.apiKey === "string" ? value.apiKey.trim() : "",
+  };
+}
+
 function normalizeArxivSettings(value) {
   return {
     removeRefs: Boolean(value?.removeRefs),
@@ -198,6 +205,10 @@ function storageSet(value) {
       resolve();
     });
   });
+}
+
+async function getJinaSettings() {
+  return normalizeJinaSettings(await storageGet(JINA_SETTINGS_KEY));
 }
 
 function createAlarm(name, when) {
@@ -520,8 +531,18 @@ function parseJinaReaderMarkdown(markdown, fallbackTitle) {
 
 async function fetchJinaBlogMarkdown(task) {
   const readerUrl = jinaReaderUrl(task.blog.url);
-  const response = await fetch(readerUrl, { method: "GET", redirect: "follow" });
+  const jinaSettings = await getJinaSettings();
+  const headers = {};
+  if (jinaSettings.apiKey) {
+    headers.Authorization = jinaSettings.apiKey.toLowerCase().startsWith("bearer ")
+      ? jinaSettings.apiKey
+      : `Bearer ${jinaSettings.apiKey}`;
+  }
+  const response = await fetch(readerUrl, { method: "GET", redirect: "follow", headers });
   if (!response.ok) {
+    if (!jinaSettings.apiKey && [401, 403, 429, 451].includes(response.status)) {
+      throw new Error(`Jina Reader HTTP ${response.status}; configure a Jina API key in Blog settings and retry`);
+    }
     throw new Error(`Jina Reader HTTP ${response.status}`);
   }
   const markdown = await response.text();
