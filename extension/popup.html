@@ -372,11 +372,17 @@
         </summary>
         <div class="settings-body">
           <input type="password" id="jinaApiKeyInput" class="settings-input" placeholder="Jina API key">
+          <label class="settings-option">
+            <input type="checkbox" id="jinaReaderLmCheckbox">
+            <span>Use ReaderLM-v2 when API key is set</span>
+          </label>
+          <input type="text" id="jinaRemoveSelectorInput" class="settings-input" placeholder="X-Remove-Selector">
+          <input type="text" id="jinaTimeoutInput" class="settings-input" placeholder="X-Timeout seconds">
           <div class="settings-actions">
-            <button class="mini-btn" id="saveJinaSettingsBtn" type="button">Save Key</button>
-            <button class="mini-btn" id="clearJinaSettingsBtn" type="button">Clear</button>
+            <button class="mini-btn" id="saveJinaSettingsBtn" type="button">Save Settings</button>
+            <button class="mini-btn" id="clearJinaSettingsBtn" type="button">Clear Key</button>
           </div>
-          <div class="hint">Stored in Chrome extension local storage and sent as Authorization: Bearer only when the Blog queue fetches Jina Reader.</div>
+          <div class="hint">Stored locally. With an API key, Blog fetch sends Authorization: Bearer, Accept: text/event-stream, X-Respond-With: readerlm-v2, X-Remove-Selector, and X-Timeout.</div>
         </div>
       </details>
 

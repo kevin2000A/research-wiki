@@ -3,6 +3,12 @@ const ARXIV2MD_MARKDOWN_API = "https://arxiv2md.org/api/markdown";
 const ARXIV2MD_METADATA_API = "https://arxiv2md.org/api/json";
 const JINA_READER_PREFIX = "https://r.jina.ai/";
 const JINA_SETTINGS_KEY = "llmWikiJinaSettingsV1";
+const DEFAULT_JINA_SETTINGS = {
+  apiKey: "",
+  removeSelector: "header, nav, footer, aside, .sidebar, .comments, #comments",
+  timeoutSeconds: "60",
+  readerLmV2: true,
+};
 
 const statusBar = document.getElementById("statusBar");
 const titleInput = document.getElementById("titleInput");
@@ -23,6 +29,9 @@ const blogUrlInput = document.getElementById("blogUrlInput");
 const blogReaderPreview = document.getElementById("blogReaderPreview");
 const jinaSettingsSummary = document.getElementById("jinaSettingsSummary");
 const jinaApiKeyInput = document.getElementById("jinaApiKeyInput");
+const jinaRemoveSelectorInput = document.getElementById("jinaRemoveSelectorInput");
+const jinaTimeoutInput = document.getElementById("jinaTimeoutInput");
+const jinaReaderLmCheckbox = document.getElementById("jinaReaderLmCheckbox");
 const saveJinaSettingsBtn = document.getElementById("saveJinaSettingsBtn");
 const clearJinaSettingsBtn = document.getElementById("clearJinaSettingsBtn");
 const paperInput = document.getElementById("paperInput");
@@ -53,7 +62,7 @@ let queueTasks = [];
 let queueStateVersion = 0;
 let queueLoadRequestId = 0;
 let extractedTweet = null;
-let currentJinaSettings = { apiKey: "" };
+let currentJinaSettings = { ...DEFAULT_JINA_SETTINGS };
 const ARXIV_SETTINGS_KEY = "llmWikiArxiv2mdSettingsV1";
 const DEFAULT_ARXIV_SETTINGS = {
   removeRefs: false,
@@ -72,7 +81,16 @@ function normalizeArxivSettings(value) {
 
 function normalizeJinaSettings(value) {
   return {
-    apiKey: typeof value?.apiKey === "string" ? value.apiKey.trim() : "",
+    apiKey: typeof value?.apiKey === "string" ? value.apiKey.trim() : DEFAULT_JINA_SETTINGS.apiKey,
+    removeSelector: typeof value?.removeSelector === "string"
+      ? value.removeSelector.trim()
+      : DEFAULT_JINA_SETTINGS.removeSelector,
+    timeoutSeconds: typeof value?.timeoutSeconds === "string"
+      ? value.timeoutSeconds.trim()
+      : DEFAULT_JINA_SETTINGS.timeoutSeconds,
+    readerLmV2: typeof value?.readerLmV2 === "boolean"
+      ? value.readerLmV2
+      : DEFAULT_JINA_SETTINGS.readerLmV2,
   };
 }
 
@@ -102,7 +120,14 @@ function storageSet(value) {
 
 function syncJinaSettingsInputs() {
   jinaApiKeyInput.value = currentJinaSettings.apiKey;
-  jinaSettingsSummary.textContent = `api key: ${currentJinaSettings.apiKey ? "set" : "unset"}`;
+  jinaRemoveSelectorInput.value = currentJinaSettings.removeSelector;
+  jinaTimeoutInput.value = currentJinaSettings.timeoutSeconds;
+  jinaReaderLmCheckbox.checked = currentJinaSettings.readerLmV2;
+  jinaSettingsSummary.textContent = [
+    `api key: ${currentJinaSettings.apiKey ? "set" : "unset"}`,
+    `readerlm-v2: ${currentJinaSettings.readerLmV2 ? "on" : "off"}`,
+    `timeout: ${currentJinaSettings.timeoutSeconds || "default"}s`,
+  ].join(" · ");
   clearJinaSettingsBtn.disabled = !currentJinaSettings.apiKey;
 }
 
@@ -113,7 +138,12 @@ async function loadJinaSettings() {
 }
 
 async function persistJinaSettings() {
-  currentJinaSettings = normalizeJinaSettings({ apiKey: jinaApiKeyInput.value });
+  currentJinaSettings = normalizeJinaSettings({
+    apiKey: jinaApiKeyInput.value,
+    removeSelector: jinaRemoveSelectorInput.value,
+    timeoutSeconds: jinaTimeoutInput.value,
+    readerLmV2: jinaReaderLmCheckbox.checked,
+  });
   await storageSet({ [JINA_SETTINGS_KEY]: currentJinaSettings });
   syncJinaSettingsInputs();
 }
@@ -507,7 +537,14 @@ function updatePaperPreview() {
 
 function updateBlogPreview() {
   const blogUrl = normalizeBlogUrl(blogUrlInput.value || pageUrl);
-  blogReaderPreview.textContent = blogUrl ? jinaReaderUrl(blogUrl) : "Enter an http(s) blog/article URL.";
+  blogReaderPreview.textContent = blogUrl
+    ? [
+        jinaReaderUrl(blogUrl),
+        `ReaderLM-v2: ${currentJinaSettings.readerLmV2 ? (currentJinaSettings.apiKey ? "on" : "needs API key") : "off"}`,
+        `Remove selector: ${currentJinaSettings.removeSelector || "none"}`,
+        `Timeout: ${currentJinaSettings.timeoutSeconds || "default"}s`,
+      ].join("\n")
+    : "Enter an http(s) blog/article URL.";
   updateActionState();
 }
 
@@ -1665,7 +1702,8 @@ blogUrlInput.addEventListener("keydown", (event) => {
 saveJinaSettingsBtn.addEventListener("click", async () => {
   try {
     await persistJinaSettings();
-    setStatus("success", "✓ Saved Jina API key");
+    updateBlogPreview();
+    setStatus("success", "✓ Saved Jina settings");
   } catch (err) {
     setStatus("error", `✗ Failed to save Jina settings: ${err.message}`);
   }
@@ -1674,6 +1712,7 @@ clearJinaSettingsBtn.addEventListener("click", async () => {
   jinaApiKeyInput.value = "";
   try {
     await persistJinaSettings();
+    updateBlogPreview();
     setStatus("success", "✓ Cleared Jina API key");
   } catch (err) {
     setStatus("error", `✗ Failed to clear Jina settings: ${err.message}`);

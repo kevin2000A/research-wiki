@@ -3,6 +3,12 @@ const ARXIV2MD_MARKDOWN_API = "https://arxiv2md.org/api/markdown";
 const ARXIV2MD_METADATA_API = "https://arxiv2md.org/api/json";
 const JINA_READER_PREFIX = "https://r.jina.ai/";
 const JINA_SETTINGS_KEY = "llmWikiJinaSettingsV1";
+const DEFAULT_JINA_SETTINGS = {
+  apiKey: "",
+  removeSelector: "header, nav, footer, aside, .sidebar, .comments, #comments",
+  timeoutSeconds: "60",
+  readerLmV2: true,
+};
 const QUEUE_STORAGE_KEY = "llmWikiPaperQueueV1";
 const QUEUE_ALARM = "llmWikiPaperQueueTick";
 const DEFAULT_ARXIV_SETTINGS = {
@@ -50,6 +56,21 @@ function normalizeBlogUrl(value) {
   } catch {
     return "";
   }
+}
+
+function normalizeJinaSettings(value) {
+  return {
+    apiKey: typeof value?.apiKey === "string" ? value.apiKey.trim() : DEFAULT_JINA_SETTINGS.apiKey,
+    removeSelector: typeof value?.removeSelector === "string"
+      ? value.removeSelector.trim()
+      : DEFAULT_JINA_SETTINGS.removeSelector,
+    timeoutSeconds: typeof value?.timeoutSeconds === "string"
+      ? value.timeoutSeconds.trim()
+      : DEFAULT_JINA_SETTINGS.timeoutSeconds,
+    readerLmV2: typeof value?.readerLmV2 === "boolean"
+      ? value.readerLmV2
+      : DEFAULT_JINA_SETTINGS.readerLmV2,
+  };
 }
 
 function jinaReaderUrl(url) {
@@ -123,12 +144,6 @@ function normalizeBlogSnapshot(value) {
   return {
     url: normalizeBlogUrl(value?.url || ""),
     title: typeof value?.title === "string" ? value.title.trim() : "",
-  };
-}
-
-function normalizeJinaSettings(value) {
-  return {
-    apiKey: typeof value?.apiKey === "string" ? value.apiKey.trim() : "",
   };
 }
 
@@ -539,14 +554,86 @@ function jinaReaderErrorLine(markdown) {
     .find((line) => line.startsWith("Warning: Target URL returned error") || line.startsWith("Error:"));
 }
 
+function parseJinaEventStream(text) {
+  const chunks = [];
+  let eventName = "message";
+  let dataLines = [];
+
+  function eventText(value) {
+    if (typeof value === "string") return value;
+    if (typeof value?.text === "string") return value.text;
+    if (typeof value?.content === "string") return value.content;
+    if (typeof value?.data === "string") return value.data;
+    if (typeof value?.delta === "string") return value.delta;
+    if (typeof value?.choices?.[0]?.delta?.content === "string") return value.choices[0].delta.content;
+    if (typeof value?.choices?.[0]?.message?.content === "string") return value.choices[0].message.content;
+    return "";
+  }
+
+  function flushEvent() {
+    if (dataLines.length === 0) return;
+    const rawData = dataLines.join("\n");
+    dataLines = [];
+    if (rawData === "[DONE]") return;
+    let value = rawData;
+    try {
+      value = JSON.parse(rawData);
+    } catch {
+      value = rawData;
+    }
+    if (eventName === "error") {
+      throw new Error(eventText(value) || rawData);
+    }
+    const chunk = eventText(value);
+    if (chunk) chunks.push(chunk);
+  }
+
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) {
+      flushEvent();
+      eventName = "message";
+    } else if (line.startsWith("event:")) {
+      eventName = line.slice("event:".length).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice("data:".length).trimStart());
+    }
+  }
+  flushEvent();
+
+  return chunks.join("");
+}
+
+function jinaErrorDetail(bodyText) {
+  try {
+    const bodyJson = JSON.parse(bodyText);
+    return bodyJson?.readableMessage || bodyJson?.message || "";
+  } catch {
+    try {
+      return parseJinaEventStream(bodyText) || bodyText.trim().slice(0, 500);
+    } catch (err) {
+      return err.message;
+    }
+  }
+}
+
 async function fetchJinaBlogMarkdown(task) {
   const readerUrl = jinaReaderUrl(task.blog.url);
   const jinaSettings = await getJinaSettings();
   const headers = {};
+  if (jinaSettings.removeSelector) {
+    headers["X-Remove-Selector"] = jinaSettings.removeSelector;
+  }
+  if (jinaSettings.timeoutSeconds) {
+    headers["X-Timeout"] = jinaSettings.timeoutSeconds;
+  }
   if (jinaSettings.apiKey) {
     headers.Authorization = jinaSettings.apiKey.toLowerCase().startsWith("bearer ")
       ? jinaSettings.apiKey
       : `Bearer ${jinaSettings.apiKey}`;
+    if (jinaSettings.readerLmV2) {
+      headers.Accept = "text/event-stream";
+      headers["X-Respond-With"] = "readerlm-v2";
+    }
   }
   let response;
   try {
@@ -556,20 +643,18 @@ async function fetchJinaBlogMarkdown(task) {
   }
   if (!response.ok) {
     const bodyText = await response.text();
-    let detail = "";
-    try {
-      const bodyJson = JSON.parse(bodyText);
-      detail = bodyJson?.readableMessage || bodyJson?.message || "";
-    } catch {
-      detail = bodyText.trim().slice(0, 240);
-    }
+    const detail = jinaErrorDetail(bodyText).trim().slice(0, 500);
     const suffix = detail ? `: ${detail}` : "";
     if (!jinaSettings.apiKey && [401, 403, 429, 451].includes(response.status)) {
       throw new Error(`Jina Reader HTTP ${response.status}${suffix}; configure a Jina API key in Blog settings and retry`);
     }
     throw new Error(`Jina Reader HTTP ${response.status}${suffix}`);
   }
-  const markdown = await response.text();
+  const bodyText = await response.text();
+  const contentType = response.headers.get("content-type") || "";
+  const markdown = contentType.includes("text/event-stream")
+    ? parseJinaEventStream(bodyText)
+    : bodyText;
   if (!markdown.trim()) {
     throw new Error("Jina Reader markdown was empty");
   }
