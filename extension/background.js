@@ -60,15 +60,24 @@ function normalizeTweetMedia(value) {
     : [];
 }
 
+function normalizeRelatedTweet(value, fallbackKind = "quote") {
+  if (!value || typeof value !== "object") return null;
+  const normalized = {
+    kind: value.kind === "repost" ? "repost" : fallbackKind,
+    tweetId: typeof value.tweetId === "string" ? value.tweetId : "",
+    url: typeof value.url === "string" ? value.url : "",
+    authorName: typeof value.authorName === "string" ? value.authorName : "",
+    authorHandle: typeof value.authorHandle === "string" ? value.authorHandle : "",
+    createdAt: typeof value.createdAt === "string" ? value.createdAt : "",
+    text: typeof value.text === "string" ? value.text : "",
+    media: normalizeTweetMedia(value.media),
+  };
+  return normalized.url || normalized.text || normalized.media.length > 0 ? normalized : null;
+}
+
 function normalizeTweetSnapshot(value) {
-  const quoted = value?.quotedTweet && typeof value.quotedTweet === "object"
-    ? {
-        url: typeof value.quotedTweet.url === "string" ? value.quotedTweet.url : "",
-        authorName: typeof value.quotedTweet.authorName === "string" ? value.quotedTweet.authorName : "",
-        authorHandle: typeof value.quotedTweet.authorHandle === "string" ? value.quotedTweet.authorHandle : "",
-        text: typeof value.quotedTweet.text === "string" ? value.quotedTweet.text : "",
-      }
-    : null;
+  const related = normalizeRelatedTweet(value?.relatedTweet, "quote")
+    || normalizeRelatedTweet(value?.quotedTweet, "quote");
   return {
     tweetId: typeof value?.tweetId === "string" ? value.tweetId : "",
     url: typeof value?.url === "string" ? value.url : "",
@@ -77,7 +86,15 @@ function normalizeTweetSnapshot(value) {
     createdAt: typeof value?.createdAt === "string" ? value.createdAt : "",
     text: typeof value?.text === "string" ? value.text : "",
     media: normalizeTweetMedia(value?.media),
-    quotedTweet: quoted && (quoted.url || quoted.text) ? quoted : null,
+    relatedTweet: related,
+    quotedTweet: related && related.kind === "quote"
+      ? {
+          url: related.url,
+          authorName: related.authorName,
+          authorHandle: related.authorHandle,
+          text: related.text,
+        }
+      : null,
   };
 }
 
@@ -525,21 +542,7 @@ async function processPaperTask(task) {
   };
 }
 
-async function processTweetTask(task) {
-  if (!task.tweet?.tweetId || !task.tweet?.url) {
-    throw new Error("Tweet snapshot is missing required fields");
-  }
-
-  const mediaItems = Array.isArray(task.tweet.media) ? task.tweet.media : [];
-  await updateTask(task.id, (item) => {
-    item.status = "fetching";
-    item.statusText = mediaItems.length > 0
-      ? `Downloading tweet media (${mediaItems.length})`
-      : "Preparing tweet snapshot";
-    item.error = "";
-    item.attemptCount += 1;
-  });
-
+async function downloadTweetMedia(mediaItems, fileStem, filePrefix = "") {
   const successfulAssets = [];
   const successfulMedia = [];
   let failedMediaCount = 0;
@@ -551,7 +554,7 @@ async function processTweetTask(task) {
       if (!download.mimeType.toLowerCase().startsWith("image/")) {
         throw new Error(`Unexpected media type ${download.mimeType}`);
       }
-      const fileName = `${String(index + 1).padStart(3, "0")}-${sanitizeFileStem(task.tweet.tweetId)}.${extensionForMime(download.mimeType)}`;
+      const fileName = `${filePrefix}${String(index + 1).padStart(3, "0")}-${fileStem}.${extensionForMime(download.mimeType)}`;
       successfulAssets.push({
         originalUrl: media.url,
         fileName,
@@ -564,10 +567,50 @@ async function processTweetTask(task) {
     }
   }
 
+  return {
+    assets: successfulAssets,
+    media: successfulMedia,
+    failedMediaCount,
+  };
+}
+
+async function processTweetTask(task) {
+  if (!task.tweet?.tweetId || !task.tweet?.url) {
+    throw new Error("Tweet snapshot is missing required fields");
+  }
+
+  const mediaItems = Array.isArray(task.tweet.media) ? task.tweet.media : [];
+  const relatedTweet = task.tweet.relatedTweet || task.tweet.quotedTweet || null;
+  const relatedMediaItems = Array.isArray(relatedTweet?.media) ? relatedTweet.media : [];
+  const totalMediaCount = mediaItems.length + relatedMediaItems.length;
+  await updateTask(task.id, (item) => {
+    item.status = "fetching";
+    item.statusText = totalMediaCount > 0
+      ? `Downloading tweet media (${totalMediaCount})`
+      : "Preparing tweet snapshot";
+    item.error = "";
+    item.attemptCount += 1;
+  });
+
+  const mainDownload = await downloadTweetMedia(
+    mediaItems,
+    sanitizeFileStem(task.tweet.tweetId),
+    "",
+  );
+  const relatedDownload = relatedTweet
+    ? await downloadTweetMedia(
+        relatedMediaItems,
+        sanitizeFileStem(relatedTweet.tweetId || task.tweet.tweetId),
+        "related-",
+      )
+    : { assets: [], media: [], failedMediaCount: 0 };
+  const successfulAssets = [...mainDownload.assets, ...relatedDownload.assets];
+  const failedMediaCount = mainDownload.failedMediaCount + relatedDownload.failedMediaCount;
+
   await updateTask(task.id, (item) => {
     item.status = "saving";
     item.statusText = successfulAssets.length > 0
-      ? `Saving tweet with ${successfulAssets.length}/${mediaItems.length} images`
+      ? `Saving tweet with ${successfulAssets.length}/${totalMediaCount} images`
       : "Saving tweet to LLM Wiki";
     item.artifactKind = "tweet";
     item.fileName = `${sanitizeFileStem(task.tweet.authorHandle || "tweet")}-${sanitizeFileStem(task.tweet.tweetId)}.md`;
@@ -578,7 +621,13 @@ async function processTweetTask(task) {
     task,
     {
       ...task.tweet,
-      media: successfulMedia,
+      media: mainDownload.media,
+      relatedTweet: relatedTweet
+        ? {
+            ...relatedTweet,
+            media: relatedDownload.media,
+          }
+        : null,
     },
     successfulAssets,
   );
@@ -588,7 +637,7 @@ async function processTweetTask(task) {
     fileName: result.path || "",
     paperPath: result.path || "",
     statusText: failedMediaCount > 0
-      ? `Saved tweet to ${result.path} (${successfulAssets.length}/${mediaItems.length} images downloaded)`
+      ? `Saved tweet to ${result.path} (${successfulAssets.length}/${totalMediaCount} images downloaded)`
       : `Saved tweet to ${result.path}`,
   };
 }

@@ -357,20 +357,27 @@ function renderTweetPreview() {
     lines.push("", `Media: ${extractedTweet.media.length} image${extractedTweet.media.length === 1 ? "" : "s"}`);
   }
 
+  const relatedTweet = extractedTweet.relatedTweet || extractedTweet.quotedTweet;
+
   if (extractedTweet.debug) {
     lines.push(
       "",
-      `Debug: text=${extractedTweet.debug.textSource || "unknown"} (${extractedTweet.debug.textBlockCount || 0} blocks) · native media=${extractedTweet.debug.nativeMediaCount || 0} · discarded previews=${extractedTweet.debug.discardedPreviewMediaCount || 0}`,
+      `Debug: text=${extractedTweet.debug.textSource || "unknown"} (${extractedTweet.debug.textBlockCount || 0} blocks) · native media=${extractedTweet.debug.nativeMediaCount || 0} · related media=${extractedTweet.debug.relatedMediaCount || 0} · discarded previews=${extractedTweet.debug.discardedPreviewMediaCount || 0}`,
     );
   }
 
-  if (extractedTweet.quotedTweet?.url) {
+  if (relatedTweet?.url || relatedTweet?.text) {
+    const relatedLabel = relatedTweet.kind === "repost" ? "Reposted Tweet:" : "Quoted Tweet:";
     lines.push(
       "",
-      "Quoted Tweet:",
-      `${tweetAuthorLabel(extractedTweet.quotedTweet) || extractedTweet.quotedTweet.url}`,
-      extractedTweet.quotedTweet.text || extractedTweet.quotedTweet.url,
+      relatedLabel,
+      `${tweetAuthorLabel(relatedTweet) || relatedTweet.url}`,
+      relatedTweet.createdAt ? `Created: ${relatedTweet.createdAt}` : "",
+      relatedTweet.text || relatedTweet.url,
     );
+    if (relatedTweet.media?.length) {
+      lines.push(`Related media: ${relatedTweet.media.length} image${relatedTweet.media.length === 1 ? "" : "s"}`);
+    }
   }
 
   tweetPreview.textContent = lines.filter(Boolean).join("\n");
@@ -645,12 +652,12 @@ async function extractTweet() {
               .trim();
           }
 
-          function belongsToMainTweet(node, article) {
+          function belongsToTweetArticle(node, article) {
             return node.closest('article[data-testid="tweet"]') === article;
           }
 
           function isInNonBodyRegion(node, article) {
-            return !belongsToMainTweet(node, article)
+            return !belongsToTweetArticle(node, article)
               || Boolean(node.closest('div[data-testid="User-Name"]'))
               || Boolean(node.closest('[data-testid="card.wrapper"]'))
               || Boolean(node.closest('[role="group"]'))
@@ -659,9 +666,9 @@ async function extractTweet() {
               || Boolean(node.closest('video'));
           }
 
-          function collectMainTweetText(article) {
+          function collectTweetText(article, allowMetaFallback = false) {
             const tweetTextBlocks = Array.from(article.querySelectorAll('div[data-testid="tweetText"]'))
-              .filter((node) => belongsToMainTweet(node, article))
+              .filter((node) => belongsToTweetArticle(node, article))
               .map((node) => normalizeText(node.innerText))
               .filter(Boolean);
             if (tweetTextBlocks.length > 0) {
@@ -698,6 +705,14 @@ async function extractTweet() {
               };
             }
 
+            if (!allowMetaFallback) {
+              return {
+                text: "",
+                textBlockCount: 0,
+                textSource: "none",
+              };
+            }
+
             const ogDescription = document.querySelector('meta[property="og:description"]')?.getAttribute("content")?.trim()
               || document.querySelector('meta[name="twitter:description"]')?.getAttribute("content")?.trim()
               || document.querySelector('meta[name="description"]')?.getAttribute("content")?.trim()
@@ -707,6 +722,29 @@ async function extractTweet() {
               textBlockCount: ogDescription ? 1 : 0,
               textSource: ogDescription ? "meta" : "none",
             };
+          }
+
+          function collectNativeMedia(article) {
+            const mediaItems = [];
+            Array.from(article.querySelectorAll('[data-testid="tweetPhoto"] img')).forEach((img) => {
+              if (belongsToTweetArticle(img, article) && !img.closest('[data-testid="card.wrapper"]')) {
+                pushMedia(mediaItems, bestImageUrl(img), img.getAttribute("alt") || "tweet-photo");
+              }
+            });
+            Array.from(article.querySelectorAll('a[href*="/photo/"] img')).forEach((img) => {
+              if (belongsToTweetArticle(img, article) && !img.closest('[data-testid="card.wrapper"]')) {
+                pushMedia(mediaItems, bestImageUrl(img), img.getAttribute("alt") || "tweet-photo");
+              }
+            });
+            Array.from(article.querySelectorAll("video[poster]")).forEach((video) => {
+              if (belongsToTweetArticle(video, article) && !video.closest('[data-testid="card.wrapper"]')) {
+                pushMedia(mediaItems, absoluteUrl(video.getAttribute("poster") || ""), "tweet-video-poster");
+              }
+            });
+            mediaItems.forEach((item, index) => {
+              if (!item.alt) item.alt = `tweet-image-${index + 1}`;
+            });
+            return mediaItems;
           }
 
           function collectQuotedTweetText(article) {
@@ -722,6 +760,41 @@ async function extractTweet() {
                 .map((node) => normalizeText(node.innerText))
                 .filter(Boolean),
             ).join("\n\n");
+          }
+
+          function buildRelatedTweet(mainArticle, mainText) {
+            const nestedTweet = Array.from(mainArticle.querySelectorAll('article[data-testid="tweet"]'))[0] || null;
+            const nestedStatusLinks = nestedTweet
+              ? uniqueStrings(
+                  Array.from(nestedTweet.querySelectorAll('a[href*="/status/"]'))
+                    .map((link) => canonicalStatusUrl(link.href, targetHandle)),
+                )
+              : [];
+            const statusLinks = uniqueStrings(
+              Array.from(mainArticle.querySelectorAll('a[href*="/status/"]')).map((link) => canonicalStatusUrl(link.href, targetHandle)),
+            );
+            const relatedUrl = nestedStatusLinks.find((url) => statusIdFromUrl(url) && statusIdFromUrl(url) !== targetTweetId)
+              || statusLinks.find((url) => statusIdFromUrl(url) && statusIdFromUrl(url) !== targetTweetId)
+              || "";
+            if (!relatedUrl && !nestedTweet) return null;
+
+            const relatedText = nestedTweet
+              ? collectTweetText(nestedTweet, false)
+              : { text: collectQuotedTweetText(mainArticle), textBlockCount: 0, textSource: "legacy-quote" };
+            const relatedAuthor = nestedTweet ? collectAuthor(nestedTweet) : collectAuthor(mainArticle, true);
+            const relatedKind = !mainText.text && nestedTweet ? "repost" : "quote";
+            const relatedMedia = nestedTweet ? collectNativeMedia(nestedTweet) : [];
+            const relatedTimeNode = nestedTweet ? nestedTweet.querySelector("time") : null;
+            return {
+              kind: relatedKind,
+              tweetId: statusIdFromUrl(relatedUrl),
+              url: relatedUrl,
+              authorName: relatedAuthor.authorName,
+              authorHandle: relatedAuthor.authorHandle,
+              createdAt: relatedTimeNode?.getAttribute("datetime") || "",
+              text: relatedText.text,
+              media: relatedMedia,
+            };
           }
 
           const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
@@ -744,39 +817,20 @@ async function extractTweet() {
           const primaryUrl = canonicalTweetUrl ||
             statusLinks.find((url) => statusIdFromUrl(url) === targetTweetId) ||
             canonicalStatusUrl(location.href, targetHandle);
-          const mainText = collectMainTweetText(mainArticle);
+          const mainText = collectTweetText(mainArticle, true);
           const timeNode = mainArticle.querySelector("time");
-          const media = [];
-          Array.from(mainArticle.querySelectorAll('[data-testid="tweetPhoto"] img')).forEach((img) => {
-            if (belongsToMainTweet(img, mainArticle) && !img.closest('[data-testid="card.wrapper"]')) {
-              pushMedia(media, bestImageUrl(img), img.getAttribute("alt") || "tweet-photo");
-            }
-          });
-          Array.from(mainArticle.querySelectorAll('a[href*="/photo/"] img')).forEach((img) => {
-            if (belongsToMainTweet(img, mainArticle) && !img.closest('[data-testid="card.wrapper"]')) {
-              pushMedia(media, bestImageUrl(img), img.getAttribute("alt") || "tweet-photo");
-            }
-          });
-          Array.from(mainArticle.querySelectorAll("video[poster]")).forEach((video) => {
-            if (belongsToMainTweet(video, mainArticle) && !video.closest('[data-testid="card.wrapper"]')) {
-              pushMedia(media, absoluteUrl(video.getAttribute("poster") || ""), "tweet-video-poster");
-            }
-          });
-          media.forEach((item, index) => {
-            if (!item.alt) item.alt = `tweet-image-${index + 1}`;
-          });
-
-          const quoteUrl = statusLinks.find((url) => statusIdFromUrl(url) && statusIdFromUrl(url) !== targetTweetId) || "";
-          const quoteText = quoteUrl ? collectQuotedTweetText(mainArticle) : "";
-          const quotedAuthor = quoteUrl ? collectAuthor(mainArticle, true) : { authorName: "", authorHandle: "" };
+          const media = collectNativeMedia(mainArticle);
+          const relatedTweet = buildRelatedTweet(mainArticle, mainText);
           const discardedPreviewMediaCount = Array.from(mainArticle.querySelectorAll('[data-testid="card.wrapper"] img'))
-            .filter((img) => belongsToMainTweet(img, mainArticle))
+            .filter((img) => belongsToTweetArticle(img, mainArticle))
             .length;
           const debug = {
             textSource: mainText.textSource,
             textBlockCount: mainText.textBlockCount,
-            quotedTweetFound: Boolean(quoteUrl),
+            quotedTweetFound: relatedTweet?.kind === "quote",
+            relatedTweetFound: Boolean(relatedTweet),
             nativeMediaCount: media.length,
+            relatedMediaCount: relatedTweet?.media?.length || 0,
             discardedPreviewMediaCount,
           };
           console.debug("LLM Wiki tweet extraction", debug);
@@ -789,12 +843,13 @@ async function extractTweet() {
             createdAt: timeNode?.getAttribute("datetime") || "",
             text: mainText.text,
             media,
-            quotedTweet: quoteUrl
+            relatedTweet,
+            quotedTweet: relatedTweet
               ? {
-                  url: quoteUrl,
-                  authorName: quotedAuthor.authorName,
-                  authorHandle: quotedAuthor.authorHandle,
-                  text: quoteText,
+                  url: relatedTweet.url,
+                  authorName: relatedTweet.authorName,
+                  authorHandle: relatedTweet.authorHandle,
+                  text: relatedTweet.text,
                 }
               : null,
             debug,

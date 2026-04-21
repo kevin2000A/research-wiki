@@ -516,22 +516,50 @@ fn handle_tweet(body: &str) -> String {
         })
         .unwrap_or_default();
 
-    let quoted_tweet = &tweet["quotedTweet"];
-    let quoted_markdown = if quoted_tweet.is_object() {
-        let quoted_url = quoted_tweet["url"].as_str().unwrap_or("");
-        let quoted_author_name = quoted_tweet["authorName"].as_str().unwrap_or("");
-        let quoted_author_handle = quoted_tweet["authorHandle"].as_str().unwrap_or("");
-        let quoted_text = quoted_tweet["text"].as_str().unwrap_or("").trim();
-        if quoted_url.is_empty() && quoted_text.is_empty() {
+    let related_tweet = if tweet["relatedTweet"].is_object() {
+        &tweet["relatedTweet"]
+    } else {
+        &tweet["quotedTweet"]
+    };
+    let related_markdown = if related_tweet.is_object() {
+        let related_kind = related_tweet["kind"].as_str().unwrap_or("quote");
+        let related_heading = if related_kind == "repost" {
+            "Reposted Tweet"
+        } else {
+            "Quoted Tweet"
+        };
+        let related_url = related_tweet["url"].as_str().unwrap_or("");
+        let related_author_name = related_tweet["authorName"].as_str().unwrap_or("");
+        let related_author_handle = related_tweet["authorHandle"].as_str().unwrap_or("");
+        let related_created_at = related_tweet["createdAt"].as_str().unwrap_or("");
+        let related_text = related_tweet["text"].as_str().unwrap_or("").trim();
+        let related_media_markdown = related_tweet["media"]
+            .as_array()
+            .map(|items| {
+                items.iter()
+                    .filter_map(|item| item["url"].as_str())
+                    .map(|media_url| format!("![tweet media]({})", media_url))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if related_url.is_empty() && related_text.is_empty() && related_media_markdown.is_empty() {
             String::new()
         } else {
-            format!(
-                "\n## Quoted Tweet\n\nAuthor: {} {}\n\nURL: {}\n\n{}\n",
-                quoted_author_name,
-                quoted_author_handle,
-                quoted_url,
-                quoted_text
-            )
+            let mut related_section = format!(
+                "\n## {}\n\nAuthor: {} {}\n\nURL: {}\n\nCreated: {}\n\n### Content\n\n{}\n",
+                related_heading,
+                related_author_name,
+                related_author_handle,
+                related_url,
+                related_created_at,
+                related_text
+            );
+            if !related_media_markdown.is_empty() {
+                related_section.push_str("\n### Media\n\n");
+                related_section.push_str(&related_media_markdown.join("\n\n"));
+                related_section.push('\n');
+            }
+            related_section
         }
     } else {
         String::new()
@@ -550,7 +578,7 @@ fn handle_tweet(body: &str) -> String {
         content.push_str(&media_markdown.join("\n\n"));
         content.push('\n');
     }
-    content.push_str(&quoted_markdown);
+    content.push_str(&related_markdown);
 
     if let Some(assets) = parsed["assets"].as_array() {
         match save_tweet_assets(&project_path, &source_stem, &content, assets) {
