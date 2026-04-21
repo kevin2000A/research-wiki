@@ -16,6 +16,11 @@ const DEFAULT_ARXIV_SETTINGS = {
   removeToc: false,
   removeCitations: false,
 };
+const extensionApi = globalThis.chrome?.runtime
+  ? globalThis.chrome
+  : globalThis.browser?.runtime
+    ? globalThis.browser
+    : null;
 
 let processing = false;
 
@@ -203,9 +208,9 @@ function textToBase64(text) {
 
 function storageGet(key) {
   return new Promise((resolve, reject) => {
-    chrome.storage.local.get(key, (result) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
+    extensionApi.storage.local.get(key, (result) => {
+      if (extensionApi.runtime.lastError) {
+        reject(new Error(extensionApi.runtime.lastError.message));
         return;
       }
       resolve(result[key]);
@@ -215,9 +220,9 @@ function storageGet(key) {
 
 function storageSet(value) {
   return new Promise((resolve, reject) => {
-    chrome.storage.local.set(value, () => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
+    extensionApi.storage.local.set(value, () => {
+      if (extensionApi.runtime.lastError) {
+        reject(new Error(extensionApi.runtime.lastError.message));
         return;
       }
       resolve();
@@ -230,14 +235,14 @@ async function getJinaSettings() {
 }
 
 function createAlarm(name, when) {
-  chrome.alarms.create(name, { when });
+  extensionApi.alarms.create(name, { when });
   return Promise.resolve();
 }
 
 function sendRuntimeMessage(message) {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage(message, (response) => {
-      if (chrome.runtime.lastError) {
+    extensionApi.runtime.sendMessage(message, (response) => {
+      if (extensionApi.runtime.lastError) {
         resolve(null);
         return;
       }
@@ -954,81 +959,85 @@ async function processQueue() {
   }
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  (async () => {
-    if (!message || typeof message.type !== "string") {
-      throw new Error("Invalid message");
-    }
+if (extensionApi?.runtime?.onMessage && extensionApi?.alarms?.onAlarm) {
+  extensionApi.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    (async () => {
+      if (!message || typeof message.type !== "string") {
+        throw new Error("Invalid message");
+      }
 
-    if (message.type === "paperQueue/get") {
-      const state = await getQueueState();
-      sendResponse({ ok: true, tasks: state.tasks });
-      return;
-    }
+      if (message.type === "paperQueue/get") {
+        const state = await getQueueState();
+        sendResponse({ ok: true, tasks: state.tasks });
+        return;
+      }
 
-    if (message.type === "paperQueueUpdated") {
-      sendResponse({ ok: true });
-      return;
-    }
+      if (message.type === "paperQueueUpdated") {
+        sendResponse({ ok: true });
+        return;
+      }
 
-    if (message.type === "paperQueue/enqueue") {
-      const result = await enqueueSourceTask(message);
-      sendResponse(result);
-      return;
-    }
+      if (message.type === "paperQueue/enqueue") {
+        const result = await enqueueSourceTask(message);
+        sendResponse(result);
+        return;
+      }
 
-    if (message.type === "paperQueue/retry") {
-      const result = await retryPaperTask(message.taskId);
-      sendResponse(result);
-      return;
-    }
+      if (message.type === "paperQueue/retry") {
+        const result = await retryPaperTask(message.taskId);
+        sendResponse(result);
+        return;
+      }
 
-    if (message.type === "paperQueue/remove") {
-      const result = await removePaperTask(message.taskId);
-      sendResponse(result);
-      return;
-    }
+      if (message.type === "paperQueue/remove") {
+        const result = await removePaperTask(message.taskId);
+        sendResponse(result);
+        return;
+      }
 
-    if (message.type === "paperQueue/clearDone") {
-      const result = await clearDoneTasks();
-      sendResponse(result);
-      return;
-    }
+      if (message.type === "paperQueue/clearDone") {
+        const result = await clearDoneTasks();
+        sendResponse(result);
+        return;
+      }
 
-    if (message.type === "paperQueue/process") {
-      await scheduleQueue(10);
-      sendResponse({ ok: true });
-      return;
-    }
+      if (message.type === "paperQueue/process") {
+        await scheduleQueue(10);
+        sendResponse({ ok: true });
+        return;
+      }
 
-    throw new Error(`Unsupported message: ${message.type}`);
-  })().catch((error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    sendResponse({ ok: false, error: message });
+      throw new Error(`Unsupported message: ${message.type}`);
+    })().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      sendResponse({ ok: false, error: message });
+    });
+
+    return true;
   });
 
-  return true;
-});
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm?.name !== QUEUE_ALARM) return;
-  processQueue().catch((error) => {
-    console.error("[LLM Wiki Clipper] Failed to process source queue:", error);
+  extensionApi.alarms.onAlarm.addListener((alarm) => {
+    if (alarm?.name !== QUEUE_ALARM) return;
+    processQueue().catch((error) => {
+      console.error("[LLM Wiki Clipper] Failed to process source queue:", error);
+    });
   });
-});
 
-chrome.runtime.onInstalled.addListener(() => {
+  extensionApi.runtime.onInstalled.addListener(() => {
+    resetInterruptedTasks().catch((error) => {
+      console.error("[LLM Wiki Clipper] Failed to reset queue on install:", error);
+    });
+  });
+
+  extensionApi.runtime.onStartup.addListener(() => {
+    resetInterruptedTasks().catch((error) => {
+      console.error("[LLM Wiki Clipper] Failed to reset queue on startup:", error);
+    });
+  });
+
   resetInterruptedTasks().catch((error) => {
-    console.error("[LLM Wiki Clipper] Failed to reset queue on install:", error);
+    console.error("[LLM Wiki Clipper] Failed to restore queue:", error);
   });
-});
-
-chrome.runtime.onStartup.addListener(() => {
-  resetInterruptedTasks().catch((error) => {
-    console.error("[LLM Wiki Clipper] Failed to reset queue on startup:", error);
-  });
-});
-
-resetInterruptedTasks().catch((error) => {
-  console.error("[LLM Wiki Clipper] Failed to restore queue:", error);
-});
+} else {
+  console.error("[LLM Wiki Clipper] Chrome extension runtime API is unavailable; background queue disabled.");
+}
