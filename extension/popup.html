@@ -37,7 +37,7 @@
     }
     .mode-toggle {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr 1fr 1fr;
       gap: 6px;
       margin-bottom: 10px;
     }
@@ -311,6 +311,7 @@
 
     <div class="mode-toggle">
       <button class="mode-btn active" id="webModeBtn" type="button">Web Page</button>
+      <button class="mode-btn" id="blogModeBtn" type="button">Blog</button>
       <button class="mode-btn" id="paperModeBtn" type="button">Structured Source</button>
     </div>
 
@@ -336,6 +337,23 @@
         <label>Content Preview</label>
         <div id="contentPreview">Extracting content...</div>
       </div>
+    </div>
+
+    <div id="blogFields" class="hidden">
+      <div class="field">
+        <label>Blog URL</label>
+        <input type="text" id="blogUrlInput" placeholder="https://example.com/blog/post">
+        <div class="hint">Uses Jina Reader in the background and saves clean Markdown to raw/sources. This sends the URL to r.jina.ai.</div>
+      </div>
+
+      <div class="field">
+        <label>Jina Reader</label>
+        <div id="blogReaderPreview" class="url-preview">—</div>
+      </div>
+
+      <button class="btn btn-primary paper-action-btn" id="blogAddBtn" type="button" disabled>
+        ➕ Add Blog to Background Queue
+      </button>
     </div>
 
     <div id="paperFields" class="hidden">
@@ -394,9 +412,11 @@
       <button class="btn btn-primary paper-action-btn" id="paperAddBtn" type="button" disabled>
         ➕ Add to Background Queue
       </button>
+    </div>
 
+    <div id="queueFields" class="hidden">
       <div class="queue-toolbar">
-        <div id="paperQueueSummary" class="queue-summary">No structured sources queued yet.</div>
+        <div id="paperQueueSummary" class="queue-summary">No sources queued yet.</div>
         <div class="queue-toolbar-actions">
           <button class="mini-btn" id="refreshQueueBtn" type="button">Refresh</button>
           <button class="mini-btn" id="clearDoneBtn" type="button">Clear Done</button>
@@ -404,7 +424,7 @@
       </div>
 
       <div id="paperQueueList" class="queue-list">
-        <div class="queue-empty">No structured sources queued yet.</div>
+        <div class="queue-empty">No sources queued yet.</div>
       </div>
     </div>
 

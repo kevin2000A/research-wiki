@@ -1,6 +1,7 @@
 const API_URL = "http://127.0.0.1:19827";
 const ARXIV2MD_MARKDOWN_API = "https://arxiv2md.org/api/markdown";
 const ARXIV2MD_METADATA_API = "https://arxiv2md.org/api/json";
+const JINA_READER_PREFIX = "https://r.jina.ai/";
 
 const statusBar = document.getElementById("statusBar");
 const titleInput = document.getElementById("titleInput");
@@ -9,11 +10,16 @@ const contentPreview = document.getElementById("contentPreview");
 const clipBtn = document.getElementById("clipBtn");
 const projectSelect = document.getElementById("projectSelect");
 const webModeBtn = document.getElementById("webModeBtn");
+const blogModeBtn = document.getElementById("blogModeBtn");
 const paperModeBtn = document.getElementById("paperModeBtn");
 const webFields = document.getElementById("webFields");
+const blogFields = document.getElementById("blogFields");
 const paperFields = document.getElementById("paperFields");
+const queueFields = document.getElementById("queueFields");
 const arxivFields = document.getElementById("arxivFields");
 const tweetFields = document.getElementById("tweetFields");
+const blogUrlInput = document.getElementById("blogUrlInput");
+const blogReaderPreview = document.getElementById("blogReaderPreview");
 const paperInput = document.getElementById("paperInput");
 const paperPreview = document.getElementById("paperPreview");
 const sourceTypePreview = document.getElementById("sourceTypePreview");
@@ -23,6 +29,7 @@ const paperSettingsSummary = document.getElementById("paperSettingsSummary");
 const removeRefsCheckbox = document.getElementById("removeRefsCheckbox");
 const removeTocCheckbox = document.getElementById("removeTocCheckbox");
 const removeCitationsCheckbox = document.getElementById("removeCitationsCheckbox");
+const blogAddBtn = document.getElementById("blogAddBtn");
 const paperAddBtn = document.getElementById("paperAddBtn");
 const refreshQueueBtn = document.getElementById("refreshQueueBtn");
 const clearDoneBtn = document.getElementById("clearDoneBtn");
@@ -146,6 +153,22 @@ function parseTwitterStatusUrl(value) {
   }
 }
 
+function normalizeBlogUrl(value) {
+  const text = (value || "").trim();
+  if (!text) return "";
+  try {
+    const url = new URL(text);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
+function jinaReaderUrl(url) {
+  return url ? `${JINA_READER_PREFIX}${url.replaceAll("#", "%23")}` : "";
+}
+
 function detectSourceKind() {
   const tweetStatus = parseTwitterStatusUrl(pageUrl);
   const arxivId = parseArxivInput(paperInput.value || pageUrl);
@@ -230,7 +253,7 @@ function updateQueueSummary() {
     done: queueTasks.filter((task) => task.status === "done").length,
   };
   if (queueTasks.length === 0) {
-    paperQueueSummary.textContent = "No structured sources queued yet.";
+    paperQueueSummary.textContent = "No sources queued yet.";
   } else {
     paperQueueSummary.textContent = [
       `${counts.queued} queued`,
@@ -246,14 +269,16 @@ function renderPaperQueue() {
   updateQueueSummary();
 
   if (queueTasks.length === 0) {
-    paperQueueList.innerHTML = '<div class="queue-empty">No structured sources queued yet.</div>';
+    paperQueueList.innerHTML = '<div class="queue-empty">No sources queued yet.</div>';
     return;
   }
 
   paperQueueList.innerHTML = queueTasks.map((task) => {
     const sourceLabel = task.kind === "tweet"
       ? `${task.tweet?.authorHandle || "Tweet"} · ${task.tweet?.tweetId || task.tweetId || task.id}`
-      : `arXiv ${task.arxivId}`;
+      : task.kind === "blog"
+        ? (task.blog?.title || task.blog?.url || task.id)
+        : `arXiv ${task.arxivId}`;
     const detail = task.paperPath
       ? task.paperPath
       : task.fileName
@@ -273,7 +298,7 @@ function renderPaperQueue() {
           <div class="queue-title">${escapeHtml(sourceLabel)}</div>
           <span class="queue-badge ${escapeHtml(task.status)}">${escapeHtml(queueStatusLabel(task.status))}</span>
         </div>
-        <div class="queue-meta">${escapeHtml(task.kind === "tweet" ? "Tweet" : "arXiv")} · ${escapeHtml(task.projectName || task.projectPath)}</div>
+        <div class="queue-meta">${escapeHtml(task.kind === "tweet" ? "Tweet" : task.kind === "blog" ? "Blog" : "arXiv")} · ${escapeHtml(task.projectName || task.projectPath)}</div>
         <div class="queue-detail">${escapeHtml(task.statusText || detail || "Queued")}</div>
         ${detail && detail !== task.statusText ? `<div class="queue-detail">${escapeHtml(detail)}</div>` : ""}
         ${task.error ? `<div class="queue-error">${escapeHtml(task.error)}</div>` : ""}
@@ -317,7 +342,7 @@ async function loadPaperQueue() {
     if (requestId !== queueLoadRequestId || versionAtStart !== queueStateVersion) return;
     queueTasks = [];
     renderPaperQueue();
-    if (currentMode === "source") {
+    if (currentMode === "source" || currentMode === "blog") {
       setStatus("error", `✗ Failed to load background queue: ${err.message}`);
     }
   }
@@ -390,6 +415,17 @@ function updateActionState() {
     clipBtn.textContent = "📎 App not running — cannot save";
     paperAddBtn.disabled = true;
     paperAddBtn.textContent = "➕ App not running — cannot queue";
+    blogAddBtn.disabled = true;
+    blogAddBtn.textContent = "➕ App not running — cannot queue";
+    return;
+  }
+
+  if (currentMode === "blog") {
+    const blogUrl = normalizeBlogUrl(blogUrlInput.value || pageUrl);
+    blogAddBtn.disabled = !blogUrl || !projectSelect.value;
+    blogAddBtn.textContent = "➕ Add Blog to Background Queue";
+    clipBtn.disabled = true;
+    paperAddBtn.disabled = true;
     return;
   }
 
@@ -402,12 +438,14 @@ function updateActionState() {
     }
     paperAddBtn.textContent = "➕ Add to Background Queue";
     clipBtn.disabled = true;
+    blogAddBtn.disabled = true;
     return;
   }
 
   clipBtn.disabled = !extractedContent || !projectSelect.value;
   clipBtn.textContent = "📎 Save Raw Source";
   paperAddBtn.disabled = true;
+  blogAddBtn.disabled = true;
 }
 
 function updatePaperPreview() {
@@ -434,14 +472,24 @@ function updatePaperPreview() {
   updateActionState();
 }
 
+function updateBlogPreview() {
+  const blogUrl = normalizeBlogUrl(blogUrlInput.value || pageUrl);
+  blogReaderPreview.textContent = blogUrl ? jinaReaderUrl(blogUrl) : "Enter an http(s) blog/article URL.";
+  updateActionState();
+}
+
 function setMode(mode) {
   currentMode = mode;
   webModeBtn.classList.toggle("active", mode === "web");
+  blogModeBtn.classList.toggle("active", mode === "blog");
   paperModeBtn.classList.toggle("active", mode === "source");
   webFields.classList.toggle("hidden", mode !== "web");
+  blogFields.classList.toggle("hidden", mode !== "blog");
   paperFields.classList.toggle("hidden", mode !== "source");
-  clipBtn.classList.toggle("hidden", mode === "source");
+  queueFields.classList.toggle("hidden", mode !== "source" && mode !== "blog");
+  clipBtn.classList.toggle("hidden", mode === "source" || mode === "blog");
   paperAddBtn.classList.toggle("hidden", mode !== "source");
+  blogAddBtn.classList.toggle("hidden", mode !== "blog");
 
   if (mode === "source") {
     setSourceKind(detectSourceKind());
@@ -453,6 +501,10 @@ function setMode(mode) {
       renderTweetPreview();
       if (activeTabId) extractTweet();
     }
+    loadPaperQueue();
+  } else if (mode === "blog") {
+    if (!blogUrlInput.value && pageUrl) blogUrlInput.value = pageUrl;
+    updateBlogPreview();
     loadPaperQueue();
   } else {
     updateActionState();
@@ -523,6 +575,8 @@ async function loadCurrentTab() {
   pageUrl = tab.url || "";
   titleInput.value = tab.title || "Untitled";
   urlPreview.textContent = pageUrl;
+  blogUrlInput.value = normalizeBlogUrl(pageUrl);
+  updateBlogPreview();
 
   const tweetStatus = parseTwitterStatusUrl(pageUrl);
   const arxivId = parseArxivInput(pageUrl);
@@ -1477,6 +1531,47 @@ async function queueTweetSource() {
   }
 }
 
+async function queueBlogSource() {
+  const selectedProject = projectSelect.value;
+  if (!selectedProject) {
+    setStatus("error", "✗ Please select a project");
+    return;
+  }
+
+  const blogUrl = normalizeBlogUrl(blogUrlInput.value || pageUrl);
+  if (!blogUrl) {
+    setStatus("error", "✗ Enter a valid http(s) blog URL");
+    return;
+  }
+
+  blogAddBtn.disabled = true;
+  try {
+    const projectName = projectSelect.options[projectSelect.selectedIndex]?.textContent || selectedProject;
+    const response = await sendBackgroundMessage({
+      type: "paperQueue/enqueue",
+      kind: "blog",
+      blog: {
+        url: blogUrl,
+        title: titleInput.value || "",
+      },
+      projectPath: selectedProject,
+      projectName,
+    });
+    setQueueTasks(response.tasks || queueTasks, true);
+    setStatus(
+      "success",
+      response.duplicate
+        ? "↺ Blog is already in the background queue"
+        : "✓ Added blog to the background queue",
+    );
+    await sendBackgroundMessage({ type: "paperQueue/process" });
+  } catch (err) {
+    setStatus("error", `✗ Failed to queue blog: ${err.message}`);
+  } finally {
+    updateActionState();
+  }
+}
+
 async function queueSource() {
   if (currentSourceKind === "tweet") {
     await queueTweetSource();
@@ -1520,8 +1615,20 @@ clipBtn.addEventListener("click", () => {
   sendClip();
 });
 paperAddBtn.addEventListener("click", () => queueSource());
+blogAddBtn.addEventListener("click", () => queueBlogSource());
 webModeBtn.addEventListener("click", () => setMode("web"));
+blogModeBtn.addEventListener("click", () => setMode("blog"));
 paperModeBtn.addEventListener("click", () => setMode("source"));
+blogUrlInput.addEventListener("input", () => {
+  if (currentMode !== "blog") return;
+  updateBlogPreview();
+});
+blogUrlInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && currentMode === "blog") {
+    event.preventDefault();
+    queueBlogSource();
+  }
+});
 paperInput.addEventListener("input", () => {
   if (currentMode !== "source") return;
   setSourceKind("arxiv");

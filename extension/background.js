@@ -1,6 +1,7 @@
 const API_URL = "http://127.0.0.1:19827";
 const ARXIV2MD_MARKDOWN_API = "https://arxiv2md.org/api/markdown";
 const ARXIV2MD_METADATA_API = "https://arxiv2md.org/api/json";
+const JINA_READER_PREFIX = "https://r.jina.ai/";
 const QUEUE_STORAGE_KEY = "llmWikiPaperQueueV1";
 const QUEUE_ALARM = "llmWikiPaperQueueTick";
 const DEFAULT_ARXIV_SETTINGS = {
@@ -33,6 +34,22 @@ function sanitizeFileStem(value) {
   return String(value || "")
     .replace(/[^A-Za-z0-9._-]/g, "-")
     .replace(/^-+|-+$/g, "") || "asset";
+}
+
+function normalizeBlogUrl(value) {
+  const text = (value || "").trim();
+  if (!text) return "";
+  try {
+    const url = new URL(text);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
+function jinaReaderUrl(url) {
+  return `${JINA_READER_PREFIX}${url.replaceAll("#", "%23")}`;
 }
 
 function extensionForMime(mimeType) {
@@ -98,6 +115,13 @@ function normalizeTweetSnapshot(value) {
   };
 }
 
+function normalizeBlogSnapshot(value) {
+  return {
+    url: normalizeBlogUrl(value?.url || ""),
+    title: typeof value?.title === "string" ? value.title.trim() : "",
+  };
+}
+
 function normalizeArxivSettings(value) {
   return {
     removeRefs: Boolean(value?.removeRefs),
@@ -130,6 +154,9 @@ function paperUrls(arxivId, settings = DEFAULT_ARXIV_SETTINGS) {
 function queueTaskKey(task) {
   if (task.kind === "tweet") {
     return `${task.projectPath}::tweet::${task.tweet?.tweetId || ""}`;
+  }
+  if (task.kind === "blog") {
+    return `${task.projectPath}::blog::${task.blog?.url || ""}`;
   }
   return `${task.projectPath}::arxiv::${task.arxivId}`;
 }
@@ -195,12 +222,13 @@ function emptyQueueState() {
 }
 
 function normalizeTask(task) {
-  const kind = task?.kind === "tweet" ? "tweet" : "arxiv";
+  const kind = task?.kind === "tweet" ? "tweet" : task?.kind === "blog" ? "blog" : "arxiv";
   return {
     id: typeof task?.id === "string" ? task.id : `source-${now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind,
     arxivId: parseArxivInput(task?.arxivId || ""),
     tweet: normalizeTweetSnapshot(task?.tweet),
+    blog: normalizeBlogSnapshot(task?.blog),
     projectPath: typeof task?.projectPath === "string" ? task.projectPath : "",
     projectName: typeof task?.projectName === "string" ? task.projectName : "",
     status: typeof task?.status === "string" ? task.status : "queued",
@@ -222,7 +250,13 @@ async function getQueueState() {
   return {
     tasks: stored.tasks
       .map(normalizeTask)
-      .filter((task) => task.projectPath && (task.kind === "tweet" ? task.tweet.tweetId : task.arxivId)),
+      .filter((task) => task.projectPath && (
+        task.kind === "tweet"
+          ? task.tweet.tweetId
+          : task.kind === "blog"
+            ? task.blog.url
+            : task.arxivId
+      )),
   };
 }
 
@@ -267,14 +301,17 @@ async function updateTask(taskId, updater) {
 }
 
 async function enqueueSourceTask(payload) {
-  const kind = payload?.kind === "tweet" ? "tweet" : "arxiv";
+  const kind = payload?.kind === "tweet" ? "tweet" : payload?.kind === "blog" ? "blog" : "arxiv";
   const arxivId = parseArxivInput(payload?.arxivId || "");
   const tweet = normalizeTweetSnapshot(payload?.tweet);
+  const blog = normalizeBlogSnapshot(payload?.blog);
   const projectPath = (payload?.projectPath || "").trim();
   const projectName = (payload?.projectName || "").trim();
   if (!projectPath) throw new Error("projectPath is required");
   if (kind === "tweet") {
     if (!tweet.tweetId || !tweet.url) throw new Error("Invalid tweet snapshot");
+  } else if (kind === "blog") {
+    if (!blog.url) throw new Error("Invalid blog URL");
   } else if (!arxivId) {
     throw new Error("Invalid arXiv ID");
   }
@@ -282,7 +319,9 @@ async function enqueueSourceTask(payload) {
   const state = await getQueueState();
   const duplicateKey = kind === "tweet"
     ? `${projectPath}::tweet::${tweet.tweetId}`
-    : `${projectPath}::arxiv::${arxivId}`;
+    : kind === "blog"
+      ? `${projectPath}::blog::${blog.url}`
+      : `${projectPath}::arxiv::${arxivId}`;
   const duplicate = state.tasks.find((task) => queueTaskKey(task) === duplicateKey);
   if (duplicate) {
     return { ok: true, added: false, duplicate: true, task: duplicate, tasks: state.tasks };
@@ -293,6 +332,7 @@ async function enqueueSourceTask(payload) {
     kind,
     arxivId,
     tweet,
+    blog,
     projectPath,
     projectName,
     status: "queued",
@@ -463,6 +503,97 @@ async function saveTweetToApp(task, tweet, assets) {
   }
 
   return data;
+}
+
+function parseJinaReaderMarkdown(markdown, fallbackTitle) {
+  const titleMatch = markdown.match(/^Title:\s*(.+)$/m);
+  const marker = "Markdown Content:";
+  const markerIndex = markdown.indexOf(marker);
+  const content = markerIndex >= 0
+    ? markdown.slice(markerIndex + marker.length).trim()
+    : markdown.trim();
+  return {
+    title: titleMatch?.[1]?.trim() || fallbackTitle || "Blog Article",
+    content,
+  };
+}
+
+async function fetchJinaBlogMarkdown(task) {
+  const readerUrl = jinaReaderUrl(task.blog.url);
+  const response = await fetch(readerUrl, { method: "GET", redirect: "follow" });
+  if (!response.ok) {
+    throw new Error(`Jina Reader HTTP ${response.status}`);
+  }
+  const markdown = await response.text();
+  if (!markdown.trim()) {
+    throw new Error("Jina Reader markdown was empty");
+  }
+  return {
+    readerUrl,
+    ...parseJinaReaderMarkdown(markdown, task.blog.title),
+  };
+}
+
+async function saveBlogToApp(task, blog) {
+  const response = await fetch(`${API_URL}/clip`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: blog.title,
+      url: task.blog.url,
+      content: blog.content,
+      projectPath: task.projectPath,
+      assets: [],
+    }),
+  });
+
+  const bodyText = await response.text();
+  let data = null;
+  try {
+    data = JSON.parse(bodyText);
+  } catch {
+    throw new Error(`Invalid JSON from LLM Wiki: ${bodyText.slice(0, 240)}`);
+  }
+
+  if (!response.ok || !data?.ok) {
+    throw new Error(data?.error || `LLM Wiki HTTP ${response.status}`);
+  }
+
+  return data;
+}
+
+async function processBlogTask(task) {
+  if (!task.blog?.url) {
+    throw new Error("Blog task is missing URL");
+  }
+
+  await updateTask(task.id, (item) => {
+    item.status = "fetching";
+    item.statusText = "Downloading Markdown from Jina Reader";
+    item.error = "";
+    item.attemptCount += 1;
+  });
+
+  const blog = await fetchJinaBlogMarkdown(task);
+
+  await updateTask(task.id, (item) => {
+    item.status = "saving";
+    item.statusText = "Saving blog Markdown to LLM Wiki";
+    item.artifactKind = "blog";
+    item.fileName = `${sanitizeFileStem(blog.title)}.md`;
+    item.blog.title = blog.title;
+    item.error = "";
+  });
+
+  const result = await saveBlogToApp(task, blog);
+  return {
+    artifactKind: "blog",
+    fileName: result.path || "",
+    paperPath: result.path || "",
+    statusText: result.path
+      ? `Saved blog to ${result.path}`
+      : "Saved blog",
+  };
 }
 
 async function processPaperTask(task) {
@@ -654,7 +785,9 @@ async function processQueue() {
     try {
       const result = nextTask.kind === "tweet"
         ? await processTweetTask(nextTask)
-        : await processPaperTask(nextTask);
+        : nextTask.kind === "blog"
+          ? await processBlogTask(nextTask)
+          : await processPaperTask(nextTask);
       await updateTask(nextTask.id, (item) => {
         item.status = "done";
         item.statusText = result.statusText;
