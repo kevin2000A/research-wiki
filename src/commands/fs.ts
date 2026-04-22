@@ -39,6 +39,10 @@ export async function createDirectory(path: string): Promise<void> {
   return invoke<void>("create_directory", { path })
 }
 
+export async function revealPath(path: string): Promise<void> {
+  return invoke<void>("reveal_path", { path })
+}
+
 export async function createProject(
   name: string,
   path: string,

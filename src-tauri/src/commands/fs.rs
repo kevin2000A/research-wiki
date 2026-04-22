@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Read as IoRead;
 use std::path::Path;
+use std::process::Command;
 
 use calamine::{Reader, open_workbook_auto, Data};
 
@@ -1063,6 +1064,45 @@ pub fn create_directory(path: String) -> Result<(), String> {
     run_guarded("create_directory", || {
         fs::create_dir_all(&path)
             .map_err(|e| format!("Failed to create directory '{}': {}", path, e))
+    })
+}
+
+#[tauri::command]
+pub fn reveal_path(path: String) -> Result<(), String> {
+    run_guarded("reveal_path", || {
+        #[cfg(target_os = "macos")]
+        let status = Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .status()
+            .map_err(|e| format!("Failed to reveal '{}': {}", path, e))?;
+
+        #[cfg(target_os = "windows")]
+        let status = Command::new("explorer")
+            .arg(format!("/select,{}", path))
+            .status()
+            .map_err(|e| format!("Failed to reveal '{}': {}", path, e))?;
+
+        #[cfg(target_os = "linux")]
+        let status = {
+            let p = Path::new(&path);
+            let target = if p.is_dir() {
+                p
+            } else {
+                p.parent()
+                    .ok_or_else(|| format!("No parent directory for '{}'", path))?
+            };
+            Command::new("xdg-open")
+                .arg(target)
+                .status()
+                .map_err(|e| format!("Failed to reveal '{}': {}", path, e))?
+        };
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("Reveal command failed for '{}': {}", path, status))
+        }
     })
 }
 

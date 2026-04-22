@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback, useMemo } from "react"
-import type { MouseEvent } from "react"
+import type { MouseEvent, ReactNode } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
 import { invoke } from "@tauri-apps/api/core"
 import { Plus, FileText, RefreshCw, BookOpen, Trash2, Folder, ChevronRight, ChevronDown, RotateCcw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useWikiStore } from "@/stores/wiki-store"
-import { copyFile, listDirectory, readFile, deleteFile, findRelatedWikiPages, preprocessFile, createDirectory } from "@/commands/fs"
+import { copyFile, listDirectory, readFile, deleteFile, findRelatedWikiPages, preprocessFile, createDirectory, revealPath } from "@/commands/fs"
 import type { FileNode } from "@/types/wiki"
 import { enqueueIngest, enqueueBatch } from "@/lib/ingest-queue"
 import { useTranslation } from "react-i18next"
@@ -13,6 +13,11 @@ import { normalizePath, getFileName } from "@/lib/path-utils"
 import { cn } from "@/lib/utils"
 
 type SourceStatus = "dropped" | "ingested" | "unprocessed"
+type SourceContextMenuState = {
+  x: number
+  y: number
+  paths: string[]
+}
 
 export function SourcesView() {
   const { t } = useTranslation()
@@ -30,7 +35,13 @@ export function SourcesView() {
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set())
   const [lastSelectedPath, setLastSelectedPath] = useState<string | null>(null)
   const [sourceStatuses, setSourceStatuses] = useState<Record<string, SourceStatus>>({})
+  const [contextMenu, setContextMenu] = useState<SourceContextMenuState | null>(null)
   const sourceFiles = useMemo(() => flattenSourceFiles(sources), [sources])
+  const contextMenuFiles = useMemo(() => {
+    if (!contextMenu) return []
+    const paths = new Set(contextMenu.paths)
+    return sourceFiles.filter((node) => paths.has(node.path))
+  }, [contextMenu, sourceFiles])
 
   const loadSources = useCallback(async () => {
     if (!project) return
@@ -325,6 +336,30 @@ export function SourcesView() {
     }
   }
 
+  function handleSourceContextMenu(node: FileNode, event: MouseEvent<HTMLElement>) {
+    event.preventDefault()
+    event.stopPropagation()
+
+    const paths = selectedPaths.has(node.path)
+      ? sourceFiles.filter((file) => selectedPaths.has(file.path)).map((file) => file.path)
+      : [node.path]
+
+    if (!selectedPaths.has(node.path)) {
+      setSelectedPaths(new Set([node.path]))
+      setLastSelectedPath(node.path)
+    }
+
+    setContextMenu({
+      x: Math.max(0, Math.min(event.clientX, window.innerWidth - 240)),
+      y: Math.max(0, Math.min(event.clientY, window.innerHeight - 260)),
+      paths,
+    })
+  }
+
+  function closeContextMenu() {
+    setContextMenu(null)
+  }
+
   function selectAllSources() {
     setSelectedPaths(new Set(sourceFiles.map((node) => node.path)))
     setLastSelectedPath(sourceFiles[0]?.path ?? null)
@@ -333,6 +368,7 @@ export function SourcesView() {
   function clearSourceSelection() {
     setSelectedPaths(new Set())
     setLastSelectedPath(null)
+    closeContextMenu()
   }
 
   function handleToggleSelectAll() {
@@ -364,6 +400,14 @@ export function SourcesView() {
     }
   }
 
+  async function handleCopySourcePaths(nodes: FileNode[]) {
+    await navigator.clipboard.writeText(nodes.map((node) => node.path).join("\n"))
+  }
+
+  async function handleRevealSource(node: FileNode) {
+    await revealPath(node.path)
+  }
+
   const selectedCount = sourceFiles.filter((node) => selectedPaths.has(node.path)).length
   const selectedDroppableCount = sourceFiles
     .filter((node) => selectedPaths.has(node.path) && sourceStatuses[node.path] !== "dropped")
@@ -382,6 +426,12 @@ export function SourcesView() {
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (isEditableShortcutTarget(event.target)) return
+
+      if (contextMenu && event.key === "Escape") {
+        event.preventDefault()
+        closeContextMenu()
+        return
+      }
 
       const key = event.key.toLowerCase()
       if ((event.metaKey || event.ctrlKey) && key === "a") {
@@ -404,7 +454,16 @@ export function SourcesView() {
 
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [sourceFiles, selectedPaths, selectedCount, batchDeleting, project])
+  }, [sourceFiles, selectedPaths, selectedCount, batchDeleting, project, contextMenu])
+
+  useEffect(() => {
+    if (!contextMenu) return
+    function handlePointerDown() {
+      closeContextMenu()
+    }
+    window.addEventListener("pointerdown", handlePointerDown)
+    return () => window.removeEventListener("pointerdown", handlePointerDown)
+  }, [contextMenu])
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -476,6 +535,7 @@ export function SourcesView() {
             <SourceTree
               nodes={sources}
               onSelect={handleSelectSource}
+              onContextMenu={handleSourceContextMenu}
               onIngest={handleIngest}
               onDelete={handleDelete}
               onRestore={handleRestore}
@@ -487,6 +547,55 @@ export function SourcesView() {
           </div>
         )}
       </div>
+
+      {contextMenu && contextMenuFiles.length > 0 && (
+        <SourceContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          nodes={contextMenuFiles}
+          sourceStatuses={sourceStatuses}
+          queueingPath={queueingPath}
+          batchQueueing={batchQueueing}
+          batchDeleting={batchDeleting}
+          onOpen={(node) => {
+            closeContextMenu()
+            void handleOpenSource(node)
+          }}
+          onIngest={(node) => {
+            closeContextMenu()
+            void handleIngest(node)
+          }}
+          onBatchIngest={() => {
+            closeContextMenu()
+            void handleBatchIngest()
+          }}
+          onDrop={(node) => {
+            closeContextMenu()
+            void handleDelete(node)
+          }}
+          onDropSelected={() => {
+            closeContextMenu()
+            void handleDeleteSelected()
+          }}
+          onRestore={(node) => {
+            closeContextMenu()
+            void handleRestore(node)
+          }}
+          onRestoreSelected={() => {
+            closeContextMenu()
+            void handleRestoreSelected()
+          }}
+          onReveal={(node) => {
+            closeContextMenu()
+            void handleRevealSource(node)
+          }}
+          onCopyPaths={(nodes) => {
+            closeContextMenu()
+            void handleCopySourcePaths(nodes)
+          }}
+          onClearSelection={clearSourceSelection}
+        />
+      )}
 
       <div className="shrink-0 border-t px-4 py-2 text-xs text-muted-foreground">
         {t("sources.sourceCount", { count: countFiles(sources) })}
@@ -634,6 +743,7 @@ function isDroppedSource(projectPath: string, filePath: string): boolean {
 function SourceTree({
   nodes,
   onSelect,
+  onContextMenu,
   onIngest,
   onDelete,
   onRestore,
@@ -644,6 +754,7 @@ function SourceTree({
 }: {
   nodes: FileNode[]
   onSelect: (node: FileNode, event: MouseEvent<HTMLElement>, openFile: boolean) => void
+  onContextMenu: (node: FileNode, event: MouseEvent<HTMLElement>) => void
   onIngest: (node: FileNode) => void
   onDelete: (node: FileNode) => void
   onRestore: (node: FileNode) => void
@@ -687,6 +798,7 @@ function SourceTree({
                 <SourceTree
                   nodes={node.children}
                   onSelect={onSelect}
+                  onContextMenu={onContextMenu}
                   onIngest={onIngest}
                   onDelete={onDelete}
                   onRestore={onRestore}
@@ -713,6 +825,7 @@ function SourceTree({
               selected && "bg-accent text-accent-foreground"
             )}
             style={{ paddingLeft: `${depth * 16 + 4}px` }}
+            onContextMenu={(e) => onContextMenu(node, e)}
           >
             <input
               type="checkbox"
@@ -757,6 +870,192 @@ function SourceTree({
       })}
     </>
   )
+}
+
+function SourceContextMenu({
+  x,
+  y,
+  nodes,
+  sourceStatuses,
+  queueingPath,
+  batchQueueing,
+  batchDeleting,
+  onOpen,
+  onIngest,
+  onBatchIngest,
+  onDrop,
+  onDropSelected,
+  onRestore,
+  onRestoreSelected,
+  onReveal,
+  onCopyPaths,
+  onClearSelection,
+}: {
+  x: number
+  y: number
+  nodes: FileNode[]
+  sourceStatuses: Record<string, SourceStatus>
+  queueingPath: string | null
+  batchQueueing: boolean
+  batchDeleting: boolean
+  onOpen: (node: FileNode) => void
+  onIngest: (node: FileNode) => void
+  onBatchIngest: () => void
+  onDrop: (node: FileNode) => void
+  onDropSelected: () => void
+  onRestore: (node: FileNode) => void
+  onRestoreSelected: () => void
+  onReveal: (node: FileNode) => void
+  onCopyPaths: (nodes: FileNode[]) => void
+  onClearSelection: () => void
+}) {
+  const single = nodes.length === 1 ? nodes[0] : null
+  const droppableCount = nodes.filter((node) => sourceStatuses[node.path] !== "dropped").length
+  const droppedCount = nodes.filter((node) => sourceStatuses[node.path] === "dropped").length
+  const ingestableCount = nodes.filter((node) => sourceStatuses[node.path] !== "dropped" && isIngestableSource(node)).length
+
+  return (
+    <div
+      role="menu"
+      className="fixed z-50 min-w-56 rounded-md border bg-background p-1 text-sm text-foreground shadow-xl"
+      style={{ left: x, top: y }}
+      onPointerDown={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      {single ? (
+        <SingleSourceContextMenuItems
+          node={single}
+          status={sourceStatuses[single.path] ?? "unprocessed"}
+          queueingPath={queueingPath}
+          onOpen={onOpen}
+          onIngest={onIngest}
+          onDrop={onDrop}
+          onRestore={onRestore}
+          onReveal={onReveal}
+          onCopyPath={(node) => onCopyPaths([node])}
+        />
+      ) : (
+        <>
+          <ContextMenuItem
+            disabled={batchQueueing || ingestableCount === 0}
+            onClick={onBatchIngest}
+          >
+            Ingest selected ({ingestableCount})
+          </ContextMenuItem>
+          <ContextMenuItem
+            disabled={batchDeleting || droppableCount === 0}
+            destructive
+            onClick={onDropSelected}
+          >
+            Move selected to Drop ({droppableCount})
+          </ContextMenuItem>
+          <ContextMenuItem
+            disabled={droppedCount === 0}
+            onClick={onRestoreSelected}
+          >
+            Restore selected from Drop ({droppedCount})
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onClick={() => onCopyPaths(nodes)}>
+            Copy paths
+          </ContextMenuItem>
+          <ContextMenuItem onClick={onClearSelection}>
+            Clear selection
+          </ContextMenuItem>
+        </>
+      )}
+    </div>
+  )
+}
+
+function SingleSourceContextMenuItems({
+  node,
+  status,
+  queueingPath,
+  onOpen,
+  onIngest,
+  onDrop,
+  onRestore,
+  onReveal,
+  onCopyPath,
+}: {
+  node: FileNode
+  status: SourceStatus
+  queueingPath: string | null
+  onOpen: (node: FileNode) => void
+  onIngest: (node: FileNode) => void
+  onDrop: (node: FileNode) => void
+  onRestore: (node: FileNode) => void
+  onReveal: (node: FileNode) => void
+  onCopyPath: (node: FileNode) => void
+}) {
+  const dropped = status === "dropped"
+  const ingestable = isIngestableSource(node)
+
+  return (
+    <>
+      <ContextMenuItem onClick={() => onOpen(node)}>
+        Open
+      </ContextMenuItem>
+      {!dropped && (
+        <ContextMenuItem
+          disabled={!ingestable || queueingPath === node.path}
+          onClick={() => onIngest(node)}
+        >
+          {ingestable ? status === "ingested" ? "Re-ingest" : "Ingest" : "Not ingestable"}
+        </ContextMenuItem>
+      )}
+      <ContextMenuItem onClick={() => onReveal(node)}>
+        Reveal in Folder
+      </ContextMenuItem>
+      <ContextMenuItem onClick={() => onCopyPath(node)}>
+        Copy Path
+      </ContextMenuItem>
+      <ContextMenuSeparator />
+      {dropped ? (
+        <ContextMenuItem onClick={() => onRestore(node)}>
+          Restore from Drop
+        </ContextMenuItem>
+      ) : (
+        <ContextMenuItem destructive onClick={() => onDrop(node)}>
+          Move to Drop
+        </ContextMenuItem>
+      )}
+    </>
+  )
+}
+
+function ContextMenuItem({
+  children,
+  disabled,
+  destructive,
+  onClick,
+}: {
+  children: ReactNode
+  disabled?: boolean
+  destructive?: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      disabled={disabled}
+      className={cn(
+        "flex w-full items-center rounded-sm px-2 py-1.5 text-left text-sm outline-none transition-colors",
+        "hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground",
+        destructive && "text-destructive hover:text-destructive focus:text-destructive",
+        disabled && "pointer-events-none opacity-50",
+      )}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  )
+}
+
+function ContextMenuSeparator() {
+  return <div className="my-1 h-px bg-border" />
 }
 
 function StatusBadge({ status }: { status: SourceStatus }) {
