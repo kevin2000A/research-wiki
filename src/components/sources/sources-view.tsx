@@ -2,15 +2,17 @@ import { useState, useEffect, useCallback, useMemo } from "react"
 import type { MouseEvent } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
 import { invoke } from "@tauri-apps/api/core"
-import { Plus, FileText, RefreshCw, BookOpen, Trash2, Folder, ChevronRight, ChevronDown } from "lucide-react"
+import { Plus, FileText, RefreshCw, BookOpen, Trash2, Folder, ChevronRight, ChevronDown, RotateCcw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useWikiStore } from "@/stores/wiki-store"
-import { copyFile, listDirectory, readFile, writeFile, deleteFile, findRelatedWikiPages, preprocessFile } from "@/commands/fs"
+import { copyFile, listDirectory, readFile, deleteFile, findRelatedWikiPages, preprocessFile, createDirectory } from "@/commands/fs"
 import type { FileNode } from "@/types/wiki"
 import { enqueueIngest, enqueueBatch } from "@/lib/ingest-queue"
 import { useTranslation } from "react-i18next"
 import { normalizePath, getFileName } from "@/lib/path-utils"
 import { cn } from "@/lib/utils"
+
+type SourceStatus = "dropped" | "ingested" | "unprocessed"
 
 export function SourcesView() {
   const { t } = useTranslation()
@@ -27,6 +29,7 @@ export function SourcesView() {
   const [batchDeleting, setBatchDeleting] = useState(false)
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set())
   const [lastSelectedPath, setLastSelectedPath] = useState<string | null>(null)
+  const [sourceStatuses, setSourceStatuses] = useState<Record<string, SourceStatus>>({})
   const sourceFiles = useMemo(() => flattenSourceFiles(sources), [sources])
 
   const loadSources = useCallback(async () => {
@@ -38,10 +41,13 @@ export function SourcesView() {
       const filtered = filterTree(tree)
       setSources(filtered)
       const files = new Set(flattenSourceFiles(filtered).map((f) => f.path))
+      const statuses = await buildSourceStatuses(pp, filtered)
+      setSourceStatuses(statuses)
       setSelectedPaths((prev) => new Set([...prev].filter((path) => files.has(path))))
       setLastSelectedPath((prev) => (prev && files.has(prev) ? prev : null))
     } catch {
       setSources([])
+      setSourceStatuses({})
       setSelectedPaths(new Set())
       setLastSelectedPath(null)
     }
@@ -170,13 +176,19 @@ export function SourcesView() {
     if (!project) return
     const pp = normalizePath(project.path)
     const fileName = node.name
+    const status = sourceStatuses[node.path] ?? "unprocessed"
+    if (status === "dropped") {
+      await handleRestore(node)
+      return
+    }
+
     const confirmed = window.confirm(
       t("sources.deleteConfirm", { name: fileName })
     )
     if (!confirmed) return
 
     try {
-      const actuallyDeleted = await deleteSourceNode(pp, node)
+      await dropSourceNode(pp, node)
       await refreshSourceState(pp)
       setSelectedPaths((prev) => {
         const next = new Set(prev)
@@ -188,18 +200,18 @@ export function SourcesView() {
       }
 
       // Clear selected file if it was the deleted one
-      if (selectedFile === node.path || actuallyDeleted.includes(selectedFile ?? "")) {
+      if (selectedFile === node.path) {
         setSelectedFile(null)
       }
     } catch (err) {
-      console.error("Failed to delete source:", err)
-      window.alert(`Failed to delete: ${err}`)
+      console.error("Failed to drop source:", err)
+      window.alert(`Failed to drop: ${err}`)
     }
   }
 
   async function handleDeleteSelected() {
     if (!project || batchDeleting) return
-    const selected = sourceFiles.filter((node) => selectedPaths.has(node.path))
+    const selected = sourceFiles.filter((node) => selectedPaths.has(node.path) && sourceStatuses[node.path] !== "dropped")
     if (selected.length === 0) return
 
     const confirmed = window.confirm(
@@ -210,25 +222,51 @@ export function SourcesView() {
     setBatchDeleting(true)
     try {
       const pp = normalizePath(project.path)
-      const deletedSourcePaths = new Set(selected.map((node) => node.path))
-      const deletedWikiPaths: string[] = []
       for (const node of selected) {
-        deletedWikiPaths.push(...await deleteSourceNode(pp, node))
+        await dropSourceNode(pp, node)
       }
 
       await refreshSourceState(pp)
       setSelectedPaths(new Set())
       setLastSelectedPath(null)
 
-      if (selectedFile && (deletedSourcePaths.has(selectedFile) || deletedWikiPaths.includes(selectedFile))) {
+      if (selectedFile && selected.some((node) => node.path === selectedFile)) {
         setSelectedFile(null)
       }
     } catch (err) {
-      console.error("Failed to delete selected sources:", err)
-      window.alert(`Failed to delete selected sources: ${err}`)
+      console.error("Failed to drop selected sources:", err)
+      window.alert(`Failed to drop selected sources: ${err}`)
     } finally {
       setBatchDeleting(false)
     }
+  }
+
+  async function handleRestore(node: FileNode) {
+    if (!project) return
+    const pp = normalizePath(project.path)
+    await restoreSourceNode(pp, node)
+    await refreshSourceState(pp)
+    setSelectedPaths((prev) => {
+      const next = new Set(prev)
+      next.delete(node.path)
+      return next
+    })
+    if (lastSelectedPath === node.path) {
+      setLastSelectedPath(null)
+    }
+  }
+
+  async function handleRestoreSelected() {
+    if (!project) return
+    const selected = sourceFiles.filter((node) => selectedPaths.has(node.path) && sourceStatuses[node.path] === "dropped")
+    if (selected.length === 0) return
+    const pp = normalizePath(project.path)
+    for (const node of selected) {
+      await restoreSourceNode(pp, node)
+    }
+    await refreshSourceState(pp)
+    setSelectedPaths(new Set())
+    setLastSelectedPath(null)
   }
 
   async function handleIngest(node: FileNode) {
@@ -309,7 +347,7 @@ export function SourcesView() {
     if (!project || batchQueueing) return
     const pp = normalizePath(project.path)
     const selected = sourceFiles
-      .filter((node) => selectedPaths.has(node.path) && isIngestableSource(node))
+      .filter((node) => selectedPaths.has(node.path) && sourceStatuses[node.path] !== "dropped" && isIngestableSource(node))
     if (selected.length === 0) return
 
     setBatchQueueing(true)
@@ -327,9 +365,18 @@ export function SourcesView() {
   }
 
   const selectedCount = sourceFiles.filter((node) => selectedPaths.has(node.path)).length
-  const selectedIngestableCount = sourceFiles
-    .filter((node) => selectedPaths.has(node.path) && isIngestableSource(node))
+  const selectedDroppableCount = sourceFiles
+    .filter((node) => selectedPaths.has(node.path) && sourceStatuses[node.path] !== "dropped")
     .length
+  const selectedDroppedCount = sourceFiles
+    .filter((node) => selectedPaths.has(node.path) && sourceStatuses[node.path] === "dropped")
+    .length
+  const selectedIngestableCount = sourceFiles
+    .filter((node) => selectedPaths.has(node.path) && sourceStatuses[node.path] !== "dropped" && isIngestableSource(node))
+    .length
+  const droppedCount = sourceFiles.filter((node) => sourceStatuses[node.path] === "dropped").length
+  const ingestedCount = sourceFiles.filter((node) => sourceStatuses[node.path] === "ingested").length
+  const unprocessedCount = sourceFiles.filter((node) => sourceStatuses[node.path] === "unprocessed").length
   const allSelected = sourceFiles.length > 0 && selectedCount === sourceFiles.length
 
   useEffect(() => {
@@ -374,11 +421,20 @@ export function SourcesView() {
             variant="outline"
             size="sm"
             onClick={handleDeleteSelected}
-            disabled={batchDeleting || selectedCount === 0}
+            disabled={batchDeleting || selectedDroppableCount === 0}
             className="text-destructive hover:text-destructive"
           >
             <Trash2 className="mr-1 h-4 w-4" />
-            {batchDeleting ? t("sources.deleting") : t("sources.deleteSelected", { count: selectedCount })}
+            {batchDeleting ? t("sources.deleting") : t("sources.deleteSelected", { count: selectedDroppableCount })}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleRestoreSelected}
+            disabled={selectedDroppedCount === 0}
+          >
+            <RotateCcw className="mr-1 h-4 w-4" />
+            {t("sources.restoreSelected", { count: selectedDroppedCount })}
           </Button>
           <Button size="sm" onClick={handleBatchIngest} disabled={batchQueueing || selectedIngestableCount === 0}>
             <BookOpen className="mr-1 h-4 w-4" />
@@ -422,7 +478,9 @@ export function SourcesView() {
               onSelect={handleSelectSource}
               onIngest={handleIngest}
               onDelete={handleDelete}
+              onRestore={handleRestore}
               selectedPaths={selectedPaths}
+              sourceStatuses={sourceStatuses}
               queueingPath={queueingPath}
               depth={0}
             />
@@ -438,6 +496,7 @@ export function SourcesView() {
         {selectedIngestableCount > 0 && selectedIngestableCount !== selectedCount && (
           <span className="ml-2">· {t("sources.selectedIngestableCount", { count: selectedIngestableCount })}</span>
         )}
+        <span className="ml-2">· {t("sources.statusCounts", { dropped: droppedCount, ingested: ingestedCount, unprocessed: unprocessedCount })}</span>
       </div>
     </div>
   )
@@ -452,11 +511,7 @@ export function SourcesView() {
 async function getUniqueDestPath(dir: string, fileName: string): Promise<string> {
   const basePath = `${dir}/${fileName}`
 
-  // Check if file exists by trying to read it
-  try {
-    await readFile(basePath)
-  } catch {
-    // File doesn't exist — use original name
+  if (!await pathExists(basePath)) {
     return basePath
   }
 
@@ -466,18 +521,14 @@ async function getUniqueDestPath(dir: string, fileName: string): Promise<string>
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, "")
 
   const withDate = `${dir}/${nameWithoutExt}-${date}${ext}`
-  try {
-    await readFile(withDate)
-  } catch {
+  if (!await pathExists(withDate)) {
     return withDate
   }
 
   // Date suffix also exists — add counter
   for (let i = 2; i <= 99; i++) {
     const withCounter = `${dir}/${nameWithoutExt}-${date}-${i}${ext}`
-    try {
-      await readFile(withCounter)
-    } catch {
+    if (!await pathExists(withCounter)) {
       return withCounter
     }
   }
@@ -486,10 +537,18 @@ async function getUniqueDestPath(dir: string, fileName: string): Promise<string>
   return `${dir}/${nameWithoutExt}-${date}-${Date.now()}${ext}`
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  const normalized = normalizePath(path)
+  const slash = normalized.lastIndexOf("/")
+  const dir = normalized.slice(0, slash)
+  const name = normalized.slice(slash + 1)
+  const siblings = await listDirectory(dir)
+  return siblings.some((node) => node.name === name)
+}
+
 function filterTree(nodes: FileNode[]): FileNode[] {
-  const names = new Set(nodes.map((n) => n.name.toLowerCase()))
   return nodes
-    .filter((n) => !n.name.startsWith(".") && !isHiddenPaperArtifact(n, names))
+    .filter((n) => !shouldHideSourceNode(n))
     .map((n) => {
       if (n.is_dir && n.children) {
         return { ...n, children: filterTree(n.children) }
@@ -499,39 +558,9 @@ function filterTree(nodes: FileNode[]): FileNode[] {
     .filter((n) => !n.is_dir || (n.children && n.children.length > 0))
 }
 
-function isHiddenPaperArtifact(node: FileNode, siblingNames: Set<string>): boolean {
-  if (node.is_dir) return false
+function shouldHideSourceNode(node: FileNode): boolean {
   const lower = node.name.toLowerCase()
-  if (lower.endsWith("-source.tar.gz")) return true
-  if (lower.endsWith("-arxiv2md.md")) {
-    const stem = lower.slice(0, -"-arxiv2md.md".length)
-    return isArxivStem(stem) && siblingNames.has(`${stem}-paper.md`)
-  }
-  if (!lower.endsWith(".pdf")) return false
-  const stem = lower.slice(0, -4)
-  return isArxivStem(stem) && siblingNames.has(`${stem}-paper.md`)
-}
-
-function isArxivStem(stem: string): boolean {
-  return (
-    /^\d{4}\.\d{4,5}(?:v\d+)?$/.test(stem) ||
-    /^[a-z-]+(?:\.[a-z]+)?-\d{7}(?:v\d+)?$/i.test(stem)
-  )
-}
-
-function hiddenPaperCompanionArtifacts(node: FileNode): Array<{ path: string; name: string }> {
-  if (node.is_dir || !node.name.toLowerCase().endsWith("-paper.md")) return []
-  const dirIndex = node.path.lastIndexOf("/")
-  const dir = dirIndex >= 0 ? node.path.slice(0, dirIndex) : ""
-  const stem = node.name.slice(0, -"-paper.md".length)
-  return [
-    `${stem}-arxiv2md.md`,
-    `${stem}-source.tar.gz`,
-    `${stem}.pdf`,
-  ].map((name) => ({
-    name,
-    path: dir ? `${dir}/${name}` : name,
-  }))
+  return lower === ".cache" || lower === ".ds_store"
 }
 
 function countFiles(nodes: FileNode[]): number {
@@ -546,117 +575,60 @@ function countFiles(nodes: FileNode[]): number {
   return count
 }
 
-async function deleteSourceNode(projectPath: string, node: FileNode): Promise<string[]> {
-  const fileName = node.name
-  const relatedPages = await findRelatedWikiPages(projectPath, fileName)
+async function buildSourceStatuses(projectPath: string, nodes: FileNode[]): Promise<Record<string, SourceStatus>> {
+  const files = flattenSourceFiles(nodes)
+  const entries = await Promise.all(files.map(async (node) => {
+    if (isDroppedSource(projectPath, node.path)) {
+      return [node.path, "dropped"] as const
+    }
+    const relatedPages = await findRelatedWikiPages(projectPath, node.name)
+    return [node.path, relatedPages.length > 0 ? "ingested" : "unprocessed"] as const
+  }))
+  return Object.fromEntries(entries)
+}
 
+async function dropSourceNode(projectPath: string, node: FileNode): Promise<string> {
+  const relPath = getSourceRelativePath(projectPath, node.path)
+  if (relPath === "drop" || relPath.startsWith("drop/")) return node.path
+
+  const destRelPath = `drop/${relPath}`
+  return moveSourceNodeToRelativePath(projectPath, node, destRelPath)
+}
+
+async function restoreSourceNode(projectPath: string, node: FileNode): Promise<string> {
+  const relPath = getSourceRelativePath(projectPath, node.path)
+  const prefix = "drop/"
+  if (!relPath.startsWith(prefix)) return node.path
+
+  const restoredRelPath = relPath.slice(prefix.length)
+  return moveSourceNodeToRelativePath(projectPath, node, restoredRelPath)
+}
+
+async function moveSourceNodeToRelativePath(projectPath: string, node: FileNode, destRelPath: string): Promise<string> {
+  const sourceRoot = `${normalizePath(projectPath)}/raw/sources`
+  const destDirRel = parentRelativePath(destRelPath)
+  const destDir = destDirRel ? `${sourceRoot}/${destDirRel}` : sourceRoot
+  await createDirectory(destDir)
+  const destPath = await getUniqueDestPath(destDir, node.name)
+  await copyFile(node.path, destPath)
   await deleteFile(node.path)
+  return destPath
+}
 
-  for (const companion of hiddenPaperCompanionArtifacts(node)) {
-    try {
-      await deleteFile(companion.path)
-    } catch {
-      // companion may not exist
-    }
-    try {
-      await deleteFile(`${projectPath}/raw/sources/.cache/${companion.name}.txt`)
-    } catch {
-      // cache file may not exist
-    }
-  }
+function getSourceRelativePath(projectPath: string, filePath: string): string {
+  const root = `${normalizePath(projectPath)}/raw/sources/`
+  return normalizePath(filePath).replace(root, "")
+}
 
-  try {
-    await deleteFile(`${projectPath}/raw/sources/.cache/${fileName}.txt`)
-  } catch {
-    // cache file may not exist
-  }
+function parentRelativePath(relPath: string): string {
+  const parts = relPath.split("/")
+  parts.pop()
+  return parts.join("/")
+}
 
-  const actuallyDeleted: string[] = []
-  for (const pagePath of relatedPages) {
-    try {
-      const content = await readFile(pagePath)
-      const sourcesMatch = content.match(/^sources:\s*\[([^\]]*)\]/m)
-      if (sourcesMatch) {
-        const sourcesList = sourcesMatch[1]
-          .split(",")
-          .map((s) => s.trim().replace(/["']/g, ""))
-          .filter((s) => s.length > 0)
-
-        if (sourcesList.length > 1) {
-          const updatedSources = sourcesList.filter(
-            (s) => s.toLowerCase() !== fileName.toLowerCase()
-          )
-          const updatedContent = content.replace(
-            /^sources:\s*\[([^\]]*)\]/m,
-            `sources: [${updatedSources.map((s) => `"${s}"`).join(", ")}]`
-          )
-          await writeFile(pagePath, updatedContent)
-          continue
-        }
-      }
-
-      await deleteFile(pagePath)
-      actuallyDeleted.push(pagePath)
-    } catch (err) {
-      console.error(`Failed to process wiki page ${pagePath}:`, err)
-    }
-  }
-
-  const deletedPageSlugs = actuallyDeleted.map((p) => {
-    const name = getFileName(p).replace(".md", "")
-    return name
-  }).filter(Boolean)
-
-  if (deletedPageSlugs.length > 0) {
-    try {
-      const indexPath = `${projectPath}/wiki/index.md`
-      const indexContent = await readFile(indexPath)
-      const updatedIndex = indexContent
-        .split("\n")
-        .filter((line) => !deletedPageSlugs.some((slug) => line.toLowerCase().includes(slug.toLowerCase())))
-        .join("\n")
-      await writeFile(indexPath, updatedIndex)
-    } catch {
-      // non-critical
-    }
-  }
-
-  if (deletedPageSlugs.length > 0) {
-    try {
-      const wikiTree = await listDirectory(`${projectPath}/wiki`)
-      const allMdFiles = flattenMdFiles(wikiTree)
-      for (const file of allMdFiles) {
-        try {
-          const content = await readFile(file.path)
-          let updated = content
-          for (const slug of deletedPageSlugs) {
-            const linkRegex = new RegExp(`\\[\\[${slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\|([^\\]]+))?\\]\\]`, "gi")
-            updated = updated.replace(linkRegex, (_match, displayText) => displayText || slug)
-          }
-          if (updated !== content) {
-            await writeFile(file.path, updated)
-          }
-        } catch {
-          // skip
-        }
-      }
-    } catch {
-      // non-critical
-    }
-  }
-
-  try {
-    const logPath = `${projectPath}/wiki/log.md`
-    const logContent = await readFile(logPath).catch(() => "# Wiki Log\n")
-    const date = new Date().toISOString().slice(0, 10)
-    const keptCount = relatedPages.length - actuallyDeleted.length
-    const logEntry = `\n## [${date}] delete | ${fileName}\n\nDeleted source file and ${actuallyDeleted.length} wiki pages.${keptCount > 0 ? ` ${keptCount} shared pages kept (have other sources).` : ""}\n`
-    await writeFile(logPath, logContent.trimEnd() + logEntry)
-  } catch {
-    // non-critical
-  }
-
-  return actuallyDeleted
+function isDroppedSource(projectPath: string, filePath: string): boolean {
+  const relPath = getSourceRelativePath(projectPath, filePath)
+  return relPath === "drop" || relPath.startsWith("drop/")
 }
 
 function SourceTree({
@@ -664,7 +636,9 @@ function SourceTree({
   onSelect,
   onIngest,
   onDelete,
+  onRestore,
   selectedPaths,
+  sourceStatuses,
   queueingPath,
   depth,
 }: {
@@ -672,7 +646,9 @@ function SourceTree({
   onSelect: (node: FileNode, event: MouseEvent<HTMLElement>, openFile: boolean) => void
   onIngest: (node: FileNode) => void
   onDelete: (node: FileNode) => void
+  onRestore: (node: FileNode) => void
   selectedPaths: Set<string>
+  sourceStatuses: Record<string, SourceStatus>
   queueingPath: string | null
   depth: number
 }) {
@@ -713,7 +689,9 @@ function SourceTree({
                   onSelect={onSelect}
                   onIngest={onIngest}
                   onDelete={onDelete}
+                  onRestore={onRestore}
                   selectedPaths={selectedPaths}
+                  sourceStatuses={sourceStatuses}
                   queueingPath={queueingPath}
                   depth={depth + 1}
                 />
@@ -724,6 +702,8 @@ function SourceTree({
 
         const ingestable = isIngestableSource(node)
         const selected = selectedPaths.has(node.path)
+        const status = sourceStatuses[node.path] ?? "unprocessed"
+        const dropped = status === "dropped"
 
         return (
           <div
@@ -751,13 +731,14 @@ function SourceTree({
             >
               <FileText className="h-4 w-4 shrink-0" />
               <span className="truncate">{node.name}</span>
+              <StatusBadge status={status} />
             </button>
             <Button
               variant="ghost"
               size="icon"
               className="h-7 w-7 shrink-0"
-              title={ingestable ? "Add to ingest queue" : "Not ingestable"}
-              disabled={!ingestable || queueingPath === node.path}
+              title={dropped ? "Dropped sources cannot be ingested" : ingestable ? status === "ingested" ? "Re-ingest source" : "Add to ingest queue" : "Not ingestable"}
+              disabled={dropped || !ingestable || queueingPath === node.path}
               onClick={() => onIngest(node)}
             >
               <BookOpen className="h-4 w-4" />
@@ -766,15 +747,30 @@ function SourceTree({
               variant="ghost"
               size="icon"
               className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
-              title="Delete"
-              onClick={() => onDelete(node)}
+              title={dropped ? "Restore from Drop" : "Move to Drop"}
+              onClick={() => dropped ? onRestore(node) : onDelete(node)}
             >
-              <Trash2 className="h-3.5 w-3.5" />
+              {dropped ? <RotateCcw className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
             </Button>
           </div>
         )
       })}
     </>
+  )
+}
+
+function StatusBadge({ status }: { status: SourceStatus }) {
+  return (
+    <span
+      className={cn(
+        "ml-auto shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium",
+        status === "dropped" && "border-slate-300 bg-slate-100 text-slate-600",
+        status === "ingested" && "border-emerald-300 bg-emerald-50 text-emerald-700",
+        status === "unprocessed" && "border-amber-300 bg-amber-50 text-amber-700",
+      )}
+    >
+      {status === "dropped" ? "Drop" : status === "ingested" ? "Ingested" : "Unprocessed"}
+    </span>
   )
 }
 
@@ -819,16 +815,4 @@ function getFolderContext(projectPath: string, filePath: string): string {
   const parts = relPath.split("/")
   parts.pop()
   return parts.join(" > ")
-}
-
-function flattenMdFiles(nodes: FileNode[]): FileNode[] {
-  const files: FileNode[] = []
-  for (const node of nodes) {
-    if (node.is_dir && node.children) {
-      files.push(...flattenMdFiles(node.children))
-    } else if (!node.is_dir && node.name.endsWith(".md")) {
-      files.push(node)
-    }
-  }
-  return files
 }
