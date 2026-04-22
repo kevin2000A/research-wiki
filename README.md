@@ -389,6 +389,16 @@ npm run tauri build    # Production build
 3. Click "Load unpacked"
 4. Select the `extension/` directory
 
+Blog clipping uses a local crawl4ai helper started by the LLM Wiki app. Install its Python dependencies once before queuing Blog URLs:
+
+```bash
+bash scripts/setup-crawl4ai-helper.sh
+# equivalent:
+# python3 -m pip install -U crawl4ai
+# crawl4ai-setup
+# python3 -m playwright install chromium
+```
+
 ## Quick Start
 
 1. Launch the app → Create a new project (choose a template)

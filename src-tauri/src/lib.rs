@@ -1,5 +1,6 @@
 mod clip_server;
 mod commands;
+mod crawl4ai_helper;
 mod panic_guard;
 mod types;
 
@@ -15,6 +16,7 @@ fn clip_server_status() -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    crawl4ai_helper::start_crawl4ai_helper();
     clip_server::start_clip_server();
 
     tauri::Builder::default()
@@ -81,6 +83,9 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            if matches!(&event, tauri::RunEvent::Exit) {
+                crawl4ai_helper::stop_crawl4ai_helper();
+            }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
                 if !has_visible_windows {

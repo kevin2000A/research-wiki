@@ -357,34 +357,13 @@
       <div class="field">
         <label>Blog URL</label>
         <input type="text" id="blogUrlInput" placeholder="https://example.com/blog/post">
-        <div class="hint">Jina Reader only: this sends the URL to r.jina.ai. If Jina fails, the item fails instead of falling back to current-page extraction.</div>
+        <div class="hint">Uses the local crawl4ai helper managed by LLM Wiki. No external reader proxy or API key is used.</div>
       </div>
 
       <div class="field">
-        <label>Jina Reader</label>
-        <div id="blogReaderPreview" class="url-preview">—</div>
+        <label>crawl4ai Extraction</label>
+        <div id="blogReaderPreview" class="preview-box">—</div>
       </div>
-
-      <details id="jinaSettingsPanel" class="settings-panel">
-        <summary>
-          <span>Jina Settings</span>
-          <span id="jinaSettingsSummary" class="settings-summary">api key: unset</span>
-        </summary>
-        <div class="settings-body">
-          <input type="password" id="jinaApiKeyInput" class="settings-input" placeholder="Jina API key">
-          <label class="settings-option">
-            <input type="checkbox" id="jinaReaderLmCheckbox">
-            <span>Use ReaderLM-v2 when API key is set</span>
-          </label>
-          <input type="text" id="jinaRemoveSelectorInput" class="settings-input" placeholder="X-Remove-Selector">
-          <input type="text" id="jinaTimeoutInput" class="settings-input" placeholder="X-Timeout seconds">
-          <div class="settings-actions">
-            <button class="mini-btn" id="saveJinaSettingsBtn" type="button">Save Settings</button>
-            <button class="mini-btn" id="clearJinaSettingsBtn" type="button">Clear Key</button>
-          </div>
-          <div class="hint">Stored locally. With an API key, Blog fetch sends Authorization: Bearer, Accept: text/event-stream, X-Respond-With: readerlm-v2, X-Remove-Selector, and X-Timeout.</div>
-        </div>
-      </details>
 
       <button class="btn btn-primary paper-action-btn" id="blogAddBtn" type="button" disabled>
         ➕ Add Blog to Background Queue

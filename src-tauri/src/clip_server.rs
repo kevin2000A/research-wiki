@@ -1,7 +1,9 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::time::Duration;
 use flate2::read::GzDecoder;
 use base64::{engine::general_purpose, Engine as _};
 use tiny_http::{Header, Method, Response, Server};
@@ -20,6 +22,7 @@ const BIND_RETRY_DELAY_SECS: u64 = 2;
 const RESTART_DELAY_SECS: u64 = 5;
 const ARXIV2MD_MARKDOWN_API: &str = "https://arxiv2md.org/api/markdown";
 const ARXIV2MD_METADATA_API: &str = "https://arxiv2md.org/api/json";
+const CRAWL4AI_HELPER_PORT: u16 = 19828;
 
 /// Get current daemon status as a string
 pub fn get_daemon_status() -> &'static str {
@@ -219,6 +222,31 @@ pub fn start_clip_server() {
                     }
 
                     let result = handle_clip(&body);
+                    let status = if result.contains(r#""ok":true"#) {
+                        200
+                    } else {
+                        500
+                    };
+                    let mut response = Response::from_string(result).with_status_code(status);
+                    for h in &cors_headers {
+                        response.add_header(h.clone());
+                    }
+                    let _ = request.respond(response);
+                }
+                (&Method::Post, "/blog") => {
+                    let mut body = String::new();
+                    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+                        let err =
+                            format!(r#"{{"ok":false,"error":"Failed to read body: {}"}}"#, e);
+                        let mut response = Response::from_string(err).with_status_code(400);
+                        for h in &cors_headers {
+                            response.add_header(h.clone());
+                        }
+                        let _ = request.respond(response);
+                        continue;
+                    }
+
+                    let result = handle_blog(&body);
                     let status = if result.contains(r#""ok":true"#) {
                         200
                     } else {
@@ -461,6 +489,129 @@ fn handle_clip(body: &str) -> String {
         "ok": true,
         "path": relative_path,
     }).to_string()
+}
+
+fn handle_blog(body: &str) -> String {
+    let parsed: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return format!(r#"{{"ok":false,"error":"Invalid JSON: {}"}}"#, e),
+    };
+
+    let project_path = match parsed["projectPath"].as_str() {
+        Some(p) if !p.is_empty() => p.replace('\\', "/"),
+        _ => return r#"{"ok":false,"error":"projectPath is required"}"#.to_string(),
+    };
+    let url = match parsed["url"].as_str() {
+        Some(u) if !u.is_empty() => u,
+        _ => return r#"{"ok":false,"error":"url is required"}"#.to_string(),
+    };
+    let title = parsed["title"].as_str().unwrap_or("");
+
+    let mut crawl_payload = serde_json::Map::new();
+    crawl_payload.insert("url".to_string(), serde_json::Value::String(url.to_string()));
+    if !title.is_empty() {
+        crawl_payload.insert("title".to_string(), serde_json::Value::String(title.to_string()));
+    }
+    if let Some(options) = parsed["crawlOptions"].as_object() {
+        for key in ["cssSelector", "waitFor", "excludedTags", "wordCountThreshold"] {
+            if let Some(value) = options.get(key) {
+                crawl_payload.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+
+    let crawled = match call_crawl4ai_helper(&serde_json::Value::Object(crawl_payload)) {
+        Ok(value) => value,
+        Err(error) => {
+            return serde_json::json!({
+                "ok": false,
+                "error": error,
+            })
+            .to_string()
+        }
+    };
+
+    let markdown = match crawled["markdown"].as_str() {
+        Some(m) if !m.trim().is_empty() => m,
+        _ => return r#"{"ok":false,"error":"crawl4ai helper returned empty markdown"}"#.to_string(),
+    };
+    let crawled_title = crawled["title"]
+        .as_str()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Blog Article");
+    let crawled_url = crawled["url"].as_str().unwrap_or(url);
+
+    let clip_body = serde_json::json!({
+        "title": crawled_title,
+        "url": crawled_url,
+        "content": markdown,
+        "projectPath": project_path,
+        "assets": [],
+    })
+    .to_string();
+    let result = handle_clip(&clip_body);
+    let mut response: serde_json::Value = match serde_json::from_str(&result) {
+        Ok(value) => value,
+        Err(_) => return result,
+    };
+    if response["ok"].as_bool().unwrap_or(false) {
+        response["title"] = serde_json::Value::String(crawled_title.to_string());
+        response["url"] = serde_json::Value::String(crawled_url.to_string());
+        response["extractor"] = serde_json::Value::String("crawl4ai-local".to_string());
+    }
+    response.to_string()
+}
+
+fn call_crawl4ai_helper(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let body = payload.to_string();
+    let addr = SocketAddr::from(([127, 0, 0, 1], CRAWL4AI_HELPER_PORT));
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e| {
+        format!(
+            "crawl4ai helper is not running on http://127.0.0.1:{}. Install dependencies with: python3 -m pip install -U crawl4ai && crawl4ai-setup && python3 -m playwright install chromium. Connection error: {}",
+            CRAWL4AI_HELPER_PORT, e
+        )
+    })?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(180)))
+        .map_err(|e| format!("Failed to set crawl4ai helper read timeout: {}", e))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(30)))
+        .map_err(|e| format!("Failed to set crawl4ai helper write timeout: {}", e))?;
+
+    let request = format!(
+        "POST /crawl HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        CRAWL4AI_HELPER_PORT,
+        body.as_bytes().len(),
+        body
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("Failed to write crawl4ai helper request: {}", e))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|e| format!("Failed to read crawl4ai helper response: {}", e))?;
+
+    let (headers, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "Invalid crawl4ai helper HTTP response".to_string())?;
+    let status_code = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or(500);
+    let parsed: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("Invalid JSON from crawl4ai helper: {}", e))?;
+    if status_code >= 400 || !parsed["ok"].as_bool().unwrap_or(false) {
+        let error = parsed["error"]
+            .as_str()
+            .unwrap_or("crawl4ai helper request failed");
+        return Err(format!("crawl4ai helper HTTP {}: {}", status_code, error));
+    }
+    Ok(parsed)
 }
 
 fn handle_tweet(body: &str) -> String {

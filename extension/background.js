@@ -1,14 +1,6 @@
 const API_URL = "http://127.0.0.1:19827";
 const ARXIV2MD_MARKDOWN_API = "https://arxiv2md.org/api/markdown";
 const ARXIV2MD_METADATA_API = "https://arxiv2md.org/api/json";
-const JINA_READER_PREFIX = "https://r.jina.ai/";
-const JINA_SETTINGS_KEY = "llmWikiJinaSettingsV1";
-const DEFAULT_JINA_SETTINGS = {
-  apiKey: "",
-  removeSelector: "header, nav, footer, aside, .sidebar, .comments, #comments",
-  timeoutSeconds: "60",
-  readerLmV2: true,
-};
 const QUEUE_STORAGE_KEY = "llmWikiPaperQueueV1";
 const QUEUE_ALARM = "llmWikiPaperQueueTick";
 const DEFAULT_ARXIV_SETTINGS = {
@@ -52,11 +44,8 @@ function sanitizeFileStem(value) {
 }
 
 function normalizeBlogUrl(value) {
-  let text = (value || "").trim();
+  const text = (value || "").trim();
   if (!text) return "";
-  if (text.startsWith(JINA_READER_PREFIX)) {
-    text = decodeURIComponent(text.slice(JINA_READER_PREFIX.length));
-  }
   try {
     const url = new URL(text);
     if (url.protocol !== "http:" && url.protocol !== "https:") return "";
@@ -64,25 +53,6 @@ function normalizeBlogUrl(value) {
   } catch {
     return "";
   }
-}
-
-function normalizeJinaSettings(value) {
-  return {
-    apiKey: typeof value?.apiKey === "string" ? value.apiKey.trim() : DEFAULT_JINA_SETTINGS.apiKey,
-    removeSelector: typeof value?.removeSelector === "string"
-      ? value.removeSelector.trim()
-      : DEFAULT_JINA_SETTINGS.removeSelector,
-    timeoutSeconds: typeof value?.timeoutSeconds === "string"
-      ? value.timeoutSeconds.trim()
-      : DEFAULT_JINA_SETTINGS.timeoutSeconds,
-    readerLmV2: typeof value?.readerLmV2 === "boolean"
-      ? value.readerLmV2
-      : DEFAULT_JINA_SETTINGS.readerLmV2,
-  };
-}
-
-function jinaReaderUrl(url) {
-  return `${JINA_READER_PREFIX}${url.replaceAll("#", "%23")}`;
 }
 
 function extensionForMime(mimeType) {
@@ -233,10 +203,6 @@ function storageSet(value) {
   });
 }
 
-async function getJinaSettings() {
-  return normalizeJinaSettings(await storageGet(JINA_SETTINGS_KEY));
-}
-
 function createAlarm(name, when) {
   extensionAlarms.create(name, { when });
   return Promise.resolve();
@@ -278,6 +244,7 @@ function normalizeTask(task) {
     fileName: typeof task?.fileName === "string" ? task.fileName : "",
     paperPath: typeof task?.paperPath === "string" ? task.paperPath : "",
     arxivSettings: normalizeArxivSettings(task?.arxivSettings || DEFAULT_ARXIV_SETTINGS),
+    crawlOptions: task?.crawlOptions && typeof task.crawlOptions === "object" ? task.crawlOptions : {},
   };
 }
 
@@ -382,6 +349,7 @@ async function enqueueSourceTask(payload) {
     fileName: "",
     paperPath: "",
     arxivSettings: normalizeArxivSettings(payload?.arxivSettings || DEFAULT_ARXIV_SETTINGS),
+    crawlOptions: payload?.crawlOptions && typeof payload.crawlOptions === "object" ? payload.crawlOptions : {},
   });
 
   state.tasks.push(task);
@@ -542,157 +510,15 @@ async function saveTweetToApp(task, tweet, assets) {
   return data;
 }
 
-function parseJinaReaderMarkdown(markdown, fallbackTitle) {
-  const titleMatch = markdown.match(/^Title:\s*(.+)$/m);
-  const marker = "Markdown Content:";
-  const markerIndex = markdown.indexOf(marker);
-  const content = markerIndex >= 0
-    ? markdown.slice(markerIndex + marker.length).trim()
-    : markdown.trim();
-  return {
-    title: titleMatch?.[1]?.trim() || fallbackTitle || "Blog Article",
-    content,
-  };
-}
-
-function jinaReaderErrorLine(markdown) {
-  return markdown
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line.startsWith("Warning: Target URL returned error") || line.startsWith("Error:"));
-}
-
-function parseJinaEventStream(text) {
-  const chunks = [];
-  let eventName = "message";
-  let dataLines = [];
-
-  function eventText(value) {
-    if (typeof value === "string") return value;
-    if (typeof value?.text === "string") return value.text;
-    if (typeof value?.content === "string") return value.content;
-    if (typeof value?.data === "string") return value.data;
-    if (typeof value?.delta === "string") return value.delta;
-    if (typeof value?.choices?.[0]?.delta?.content === "string") return value.choices[0].delta.content;
-    if (typeof value?.choices?.[0]?.message?.content === "string") return value.choices[0].message.content;
-    return "";
-  }
-
-  function flushEvent() {
-    if (dataLines.length === 0) return;
-    const rawData = dataLines.join("\n");
-    dataLines = [];
-    if (rawData === "[DONE]") return;
-    let value = rawData;
-    try {
-      value = JSON.parse(rawData);
-    } catch {
-      value = rawData;
-    }
-    if (eventName === "error") {
-      throw new Error(eventText(value) || rawData);
-    }
-    const chunk = eventText(value);
-    if (chunk) chunks.push(chunk);
-  }
-
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.trim()) {
-      flushEvent();
-      eventName = "message";
-    } else if (line.startsWith("event:")) {
-      eventName = line.slice("event:".length).trim();
-    } else if (line.startsWith("data:")) {
-      dataLines.push(line.slice("data:".length).trimStart());
-    }
-  }
-  flushEvent();
-
-  return chunks.join("");
-}
-
-function jinaErrorDetail(bodyText) {
-  try {
-    const bodyJson = JSON.parse(bodyText);
-    return bodyJson?.readableMessage || bodyJson?.message || "";
-  } catch {
-    try {
-      return parseJinaEventStream(bodyText) || bodyText.trim().slice(0, 500);
-    } catch (err) {
-      return err.message;
-    }
-  }
-}
-
-async function fetchJinaBlogMarkdown(task) {
-  const readerUrl = jinaReaderUrl(task.blog.url);
-  const jinaSettings = await getJinaSettings();
-  const headers = {};
-  if (jinaSettings.removeSelector) {
-    headers["X-Remove-Selector"] = jinaSettings.removeSelector;
-  }
-  if (jinaSettings.timeoutSeconds) {
-    headers["X-Timeout"] = jinaSettings.timeoutSeconds;
-  }
-  if (jinaSettings.apiKey) {
-    headers.Authorization = jinaSettings.apiKey.toLowerCase().startsWith("bearer ")
-      ? jinaSettings.apiKey
-      : `Bearer ${jinaSettings.apiKey}`;
-    if (jinaSettings.readerLmV2) {
-      headers.Accept = "text/event-stream";
-      headers["X-Respond-With"] = "readerlm-v2";
-    }
-  }
-  let response;
-  try {
-    response = await fetch(readerUrl, { method: "GET", redirect: "follow", headers });
-  } catch (err) {
-    throw new Error(`Jina Reader fetch failed for ${readerUrl}: ${err.message}`);
-  }
-  if (!response.ok) {
-    const bodyText = await response.text();
-    const detail = jinaErrorDetail(bodyText).trim().slice(0, 500);
-    const suffix = detail ? `: ${detail}` : "";
-    if (!jinaSettings.apiKey && [401, 403, 429, 451].includes(response.status)) {
-      throw new Error(`Jina Reader HTTP ${response.status}${suffix}; configure a Jina API key in Blog settings and retry`);
-    }
-    throw new Error(`Jina Reader HTTP ${response.status}${suffix}`);
-  }
-  const bodyText = await response.text();
-  const contentType = response.headers.get("content-type") || "";
-  const markdown = contentType.includes("text/event-stream")
-    ? parseJinaEventStream(bodyText)
-    : bodyText;
-  if (!markdown.trim()) {
-    throw new Error("Jina Reader markdown was empty");
-  }
-  const errorLine = jinaReaderErrorLine(markdown);
-  if (errorLine) {
-    if (!jinaSettings.apiKey) {
-      throw new Error(`${errorLine}; configure a Jina API key in Blog settings and retry`);
-    }
-    throw new Error(errorLine);
-  }
-  const parsed = parseJinaReaderMarkdown(markdown, task.blog.title);
-  if (!parsed.content.trim()) {
-    throw new Error("Jina Reader markdown content was empty");
-  }
-  return {
-    readerUrl,
-    ...parsed,
-  };
-}
-
-async function saveBlogToApp(task, blog) {
-  const response = await fetch(`${API_URL}/clip`, {
+async function saveBlogToApp(task) {
+  const response = await fetch(`${API_URL}/blog`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      title: blog.title,
       url: task.blog.url,
-      content: blog.content,
+      title: task.blog.title || "",
       projectPath: task.projectPath,
-      assets: [],
+      crawlOptions: task.crawlOptions || {},
     }),
   });
 
@@ -718,23 +544,20 @@ async function processBlogTask(task) {
 
   await updateTask(task.id, (item) => {
     item.status = "fetching";
-    item.statusText = "Downloading Markdown from Jina Reader only";
+    item.statusText = "Extracting blog with local crawl4ai";
     item.error = "";
     item.attemptCount += 1;
   });
 
-  const blog = await fetchJinaBlogMarkdown(task);
-
   await updateTask(task.id, (item) => {
     item.status = "saving";
-    item.statusText = "Saving blog Markdown to LLM Wiki";
+    item.statusText = "Saving crawl4ai Markdown to LLM Wiki";
     item.artifactKind = "blog";
-    item.fileName = `${sanitizeFileStem(blog.title)}.md`;
-    item.blog.title = blog.title;
+    item.fileName = `${sanitizeFileStem(task.blog.title || "blog")}.md`;
     item.error = "";
   });
 
-  const result = await saveBlogToApp(task, blog);
+  const result = await saveBlogToApp(task);
   return {
     artifactKind: "blog",
     fileName: result.path || "",

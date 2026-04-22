@@ -389,6 +389,16 @@ npm run tauri build    # 生产构建
 3. 点击「加载已解压的扩展程序」
 4. 选择 `extension/` 目录
 
+Blog 剪藏使用由 LLM Wiki 应用启动的本地 crawl4ai helper。排队 Blog URL 前，请先安装一次 Python 依赖：
+
+```bash
+bash scripts/setup-crawl4ai-helper.sh
+# 等价命令：
+# python3 -m pip install -U crawl4ai
+# crawl4ai-setup
+# python3 -m playwright install chromium
+```
+
 ## 快速开始
 
 1. 启动应用 → 创建新项目（选择模板）
