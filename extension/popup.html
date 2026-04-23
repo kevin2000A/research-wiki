@@ -37,7 +37,7 @@
     }
     .mode-toggle {
       display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
+      grid-template-columns: 1fr 1fr;
       gap: 6px;
       margin-bottom: 10px;
     }
@@ -324,9 +324,8 @@
     <div id="statusBar" class="status disconnected">Checking connection...</div>
 
     <div class="mode-toggle">
-      <button class="mode-btn active" id="webModeBtn" type="button">Web Page</button>
-      <button class="mode-btn" id="blogModeBtn" type="button">Blog</button>
-      <button class="mode-btn" id="paperModeBtn" type="button">Structured Source</button>
+      <button class="mode-btn active" id="paperModeBtn" type="button">Structured Source</button>
+      <button class="mode-btn" id="webModeBtn" type="button">Web Page</button>
     </div>
 
     <div class="field">
@@ -336,7 +335,7 @@
       </select>
     </div>
 
-    <div id="webFields">
+    <div id="webFields" class="hidden">
       <div class="field">
         <label>Title</label>
         <input type="text" id="titleInput" placeholder="Page title">
@@ -353,24 +352,7 @@
       </div>
     </div>
 
-    <div id="blogFields" class="hidden">
-      <div class="field">
-        <label>Blog URL</label>
-        <input type="text" id="blogUrlInput" placeholder="https://example.com/blog/post">
-        <div class="hint">Uses the local crawl4ai helper managed by LLM Wiki. No external reader proxy or API key is used.</div>
-      </div>
-
-      <div class="field">
-        <label>crawl4ai Extraction</label>
-        <div id="blogReaderPreview" class="preview-box">—</div>
-      </div>
-
-      <button class="btn btn-primary paper-action-btn" id="blogAddBtn" type="button" disabled>
-        ➕ Add Blog to Background Queue
-      </button>
-    </div>
-
-    <div id="paperFields" class="hidden">
+    <div id="paperFields">
       <div class="field">
         <label>Detected Source</label>
         <div id="sourceTypePreview" class="url-preview">—</div>
@@ -379,7 +361,7 @@
       <div class="field">
         <label>Source URL</label>
         <div id="sourceUrlPreview" class="url-preview">—</div>
-        <div class="hint">arXiv papers and single tweet status pages share one background queue. arXiv downloads arxiv2md/PDF in background; tweets snapshot the parsed content and download media in background.</div>
+        <div class="hint">arXiv papers, blog/article URLs, and single tweet status pages share one background queue. arXiv uses arxiv2md/PDF, blogs use local crawl4ai extraction, and tweets snapshot the loaded page plus media.</div>
       </div>
 
       <div id="arxivFields">
@@ -423,8 +405,21 @@
         </div>
       </div>
 
+      <div id="sourceBlogFields" class="hidden">
+        <div class="field">
+          <label>Blog / Article URL</label>
+          <input type="text" id="blogUrlInput" placeholder="https://example.com/blog/post">
+          <div class="hint">Uses the local crawl4ai helper managed by LLM Wiki. Non-arXiv, non-X webpages default to this structured blog/article path.</div>
+        </div>
+
+        <div class="field">
+          <label>crawl4ai Extraction</label>
+          <div id="blogReaderPreview" class="preview-box">—</div>
+        </div>
+      </div>
+
       <button class="btn btn-primary paper-action-btn" id="paperAddBtn" type="button" disabled>
-        ➕ Add to Background Queue
+        ➕ Add Structured Source to Queue
       </button>
     </div>
 
@@ -442,7 +437,7 @@
       </div>
     </div>
 
-    <button class="btn btn-primary" id="clipBtn" disabled>
+    <button class="btn btn-primary hidden" id="clipBtn" disabled>
       📎 Clip to Wiki
     </button>
   </div>

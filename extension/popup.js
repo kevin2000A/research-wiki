@@ -9,14 +9,13 @@ const contentPreview = document.getElementById("contentPreview");
 const clipBtn = document.getElementById("clipBtn");
 const projectSelect = document.getElementById("projectSelect");
 const webModeBtn = document.getElementById("webModeBtn");
-const blogModeBtn = document.getElementById("blogModeBtn");
 const paperModeBtn = document.getElementById("paperModeBtn");
 const webFields = document.getElementById("webFields");
-const blogFields = document.getElementById("blogFields");
 const paperFields = document.getElementById("paperFields");
 const queueFields = document.getElementById("queueFields");
 const arxivFields = document.getElementById("arxivFields");
 const tweetFields = document.getElementById("tweetFields");
+const sourceBlogFields = document.getElementById("sourceBlogFields");
 const blogUrlInput = document.getElementById("blogUrlInput");
 const blogReaderPreview = document.getElementById("blogReaderPreview");
 const paperInput = document.getElementById("paperInput");
@@ -28,7 +27,6 @@ const paperSettingsSummary = document.getElementById("paperSettingsSummary");
 const removeRefsCheckbox = document.getElementById("removeRefsCheckbox");
 const removeTocCheckbox = document.getElementById("removeTocCheckbox");
 const removeCitationsCheckbox = document.getElementById("removeCitationsCheckbox");
-const blogAddBtn = document.getElementById("blogAddBtn");
 const paperAddBtn = document.getElementById("paperAddBtn");
 const refreshQueueBtn = document.getElementById("refreshQueueBtn");
 const clearDoneBtn = document.getElementById("clearDoneBtn");
@@ -40,8 +38,8 @@ let extractedAssets = [];
 let pageUrl = "";
 let activeTabId = null;
 let appConnected = false;
-let currentMode = "web";
-let currentSourceKind = "arxiv";
+let currentMode = "source";
+let currentSourceKind = "blog";
 let webExtractionStarted = false;
 let queueTasks = [];
 let queueStateVersion = 0;
@@ -169,14 +167,20 @@ function detectSourceKind() {
   const arxivId = parseArxivInput(paperInput.value || pageUrl);
   if (tweetStatus && !paperInput.value.trim()) return "tweet";
   if (arxivId) return "arxiv";
-  return tweetStatus ? "tweet" : "arxiv";
+  if (normalizeBlogUrl(blogUrlInput.value || pageUrl)) return "blog";
+  return tweetStatus ? "tweet" : "blog";
 }
 
 function setSourceKind(kind) {
-  currentSourceKind = kind === "tweet" ? "tweet" : "arxiv";
+  currentSourceKind = kind === "tweet" ? "tweet" : kind === "blog" ? "blog" : "arxiv";
   arxivFields.classList.toggle("hidden", currentSourceKind !== "arxiv");
   tweetFields.classList.toggle("hidden", currentSourceKind !== "tweet");
-  sourceTypePreview.textContent = currentSourceKind === "tweet" ? "X / Twitter Tweet" : "arXiv Paper";
+  sourceBlogFields.classList.toggle("hidden", currentSourceKind !== "blog");
+  sourceTypePreview.textContent = currentSourceKind === "tweet"
+    ? "X / Twitter Tweet"
+    : currentSourceKind === "blog"
+      ? "Blog / Article URL"
+      : "arXiv Paper";
 }
 
 function safeArxivFileStem(arxivId) {
@@ -337,7 +341,7 @@ async function loadPaperQueue() {
     if (requestId !== queueLoadRequestId || versionAtStart !== queueStateVersion) return;
     queueTasks = [];
     renderPaperQueue();
-    if (currentMode === "source" || currentMode === "blog") {
+    if (currentMode === "source") {
       setStatus("error", `✗ Failed to load background queue: ${err.message}`);
     }
   }
@@ -410,37 +414,29 @@ function updateActionState() {
     clipBtn.textContent = "📎 App not running — cannot save";
     paperAddBtn.disabled = true;
     paperAddBtn.textContent = "➕ App not running — cannot queue";
-    blogAddBtn.disabled = true;
-    blogAddBtn.textContent = "➕ App not running — cannot queue";
-    return;
-  }
-
-  if (currentMode === "blog") {
-    const blogUrl = normalizeBlogUrl(blogUrlInput.value || pageUrl);
-    blogAddBtn.disabled = !blogUrl || !projectSelect.value;
-    blogAddBtn.textContent = "➕ Add Blog to Background Queue";
-    clipBtn.disabled = true;
-    paperAddBtn.disabled = true;
     return;
   }
 
   if (currentMode === "source") {
     if (currentSourceKind === "tweet") {
       paperAddBtn.disabled = !extractedTweet || !projectSelect.value;
+      paperAddBtn.textContent = "➕ Add Tweet to Background Queue";
+    } else if (currentSourceKind === "blog") {
+      const blogUrl = normalizeBlogUrl(blogUrlInput.value || pageUrl);
+      paperAddBtn.disabled = !blogUrl || !projectSelect.value;
+      paperAddBtn.textContent = "➕ Add Blog to Background Queue";
     } else {
       const arxivId = parseArxivInput(paperInput.value || pageUrl);
       paperAddBtn.disabled = !arxivId || !projectSelect.value;
+      paperAddBtn.textContent = "➕ Add arXiv to Background Queue";
     }
-    paperAddBtn.textContent = "➕ Add to Background Queue";
     clipBtn.disabled = true;
-    blogAddBtn.disabled = true;
     return;
   }
 
   clipBtn.disabled = !extractedContent || !projectSelect.value;
   clipBtn.textContent = "📎 Save Raw Source";
   paperAddBtn.disabled = true;
-  blogAddBtn.disabled = true;
 }
 
 function updatePaperPreview() {
@@ -469,6 +465,7 @@ function updatePaperPreview() {
 
 function updateBlogPreview() {
   const blogUrl = normalizeBlogUrl(blogUrlInput.value || pageUrl);
+  sourceUrlPreview.textContent = blogUrl || pageUrl || "—";
   blogReaderPreview.textContent = blogUrl
     ? [
         "crawl4ai local extraction",
@@ -476,37 +473,39 @@ function updateBlogPreview() {
         `URL: ${blogUrl}`,
         "Saved raw source appears in LLM Wiki after the queue item finishes.",
       ].join("\n")
-    : "Enter an http(s) blog/article URL.";
+    : "Open an http(s) webpage or enter a valid blog/article URL.";
   updateActionState();
+}
+
+function refreshStructuredSourcePreview({ extractTweetPreview = false } = {}) {
+  setSourceKind(detectSourceKind());
+  if (currentSourceKind === "arxiv") {
+    const currentId = parseArxivInput(pageUrl);
+    if (!paperInput.value && currentId) paperInput.value = currentId;
+    updatePaperPreview();
+    return;
+  }
+  if (currentSourceKind === "tweet") {
+    renderTweetPreview();
+    if (extractTweetPreview && activeTabId) extractTweet();
+    return;
+  }
+  if (!blogUrlInput.value && pageUrl) blogUrlInput.value = pageUrl;
+  updateBlogPreview();
 }
 
 function setMode(mode) {
   currentMode = mode;
   webModeBtn.classList.toggle("active", mode === "web");
-  blogModeBtn.classList.toggle("active", mode === "blog");
   paperModeBtn.classList.toggle("active", mode === "source");
   webFields.classList.toggle("hidden", mode !== "web");
-  blogFields.classList.toggle("hidden", mode !== "blog");
   paperFields.classList.toggle("hidden", mode !== "source");
-  queueFields.classList.toggle("hidden", mode !== "source" && mode !== "blog");
-  clipBtn.classList.toggle("hidden", mode === "source" || mode === "blog");
+  queueFields.classList.toggle("hidden", mode !== "source");
+  clipBtn.classList.toggle("hidden", mode === "source");
   paperAddBtn.classList.toggle("hidden", mode !== "source");
-  blogAddBtn.classList.toggle("hidden", mode !== "blog");
 
   if (mode === "source") {
-    setSourceKind(detectSourceKind());
-    const currentId = parseArxivInput(pageUrl);
-    if (currentSourceKind === "arxiv") {
-      if (!paperInput.value && currentId) paperInput.value = currentId;
-      updatePaperPreview();
-    } else {
-      renderTweetPreview();
-      if (activeTabId) extractTweet();
-    }
-    loadPaperQueue();
-  } else if (mode === "blog") {
-    if (!blogUrlInput.value && pageUrl) blogUrlInput.value = pageUrl;
-    updateBlogPreview();
+    refreshStructuredSourcePreview({ extractTweetPreview: true });
     loadPaperQueue();
   } else {
     updateActionState();
@@ -578,18 +577,9 @@ async function loadCurrentTab() {
   titleInput.value = tab.title || "Untitled";
   urlPreview.textContent = pageUrl;
   blogUrlInput.value = normalizeBlogUrl(pageUrl);
-  updateBlogPreview();
-
-  const tweetStatus = parseTwitterStatusUrl(pageUrl);
   const arxivId = parseArxivInput(pageUrl);
-  if (tweetStatus) {
-    setMode("source");
-  } else if (arxivId) {
-    paperInput.value = arxivId;
-    setMode("source");
-  } else {
-    setMode("web");
-  }
+  if (arxivId) paperInput.value = arxivId;
+  setMode("source");
 }
 
 async function extractTweet() {
@@ -1546,7 +1536,7 @@ async function queueBlogSource() {
     return;
   }
 
-  blogAddBtn.disabled = true;
+  paperAddBtn.disabled = true;
   try {
     const projectName = projectSelect.options[projectSelect.selectedIndex]?.textContent || selectedProject;
     const response = await sendBackgroundMessage({
@@ -1577,6 +1567,10 @@ async function queueBlogSource() {
 async function queueSource() {
   if (currentSourceKind === "tweet") {
     await queueTweetSource();
+    return;
+  }
+  if (currentSourceKind === "blog") {
+    await queueBlogSource();
     return;
   }
   await queueArxivSource();
@@ -1617,27 +1611,24 @@ clipBtn.addEventListener("click", () => {
   sendClip();
 });
 paperAddBtn.addEventListener("click", () => queueSource());
-blogAddBtn.addEventListener("click", () => queueBlogSource());
 webModeBtn.addEventListener("click", () => setMode("web"));
-blogModeBtn.addEventListener("click", () => setMode("blog"));
 paperModeBtn.addEventListener("click", () => setMode("source"));
 blogUrlInput.addEventListener("input", () => {
-  if (currentMode !== "blog") return;
-  updateBlogPreview();
+  if (currentMode !== "source") return;
+  refreshStructuredSourcePreview();
 });
 blogUrlInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && currentMode === "blog") {
+  if (event.key === "Enter" && currentMode === "source" && currentSourceKind === "blog") {
     event.preventDefault();
-    queueBlogSource();
+    queueSource();
   }
 });
 paperInput.addEventListener("input", () => {
   if (currentMode !== "source") return;
-  setSourceKind("arxiv");
-  updatePaperPreview();
+  refreshStructuredSourcePreview();
 });
 paperInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && currentMode === "source" && currentSourceKind === "arxiv") {
+  if (event.key === "Enter" && currentMode === "source") {
     event.preventDefault();
     queueSource();
   }
@@ -1646,7 +1637,7 @@ for (const checkbox of [removeRefsCheckbox, removeTocCheckbox, removeCitationsCh
   checkbox.addEventListener("change", async () => {
     try {
       await persistArxivSettings();
-      updatePaperPreview();
+      refreshStructuredSourcePreview();
     } catch (err) {
       setStatus("error", `✗ Failed to save arXiv settings: ${err.message}`);
     }
