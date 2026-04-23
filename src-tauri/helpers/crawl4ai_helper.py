@@ -51,6 +51,14 @@ def result_title(result, fallback_title, url):
     return parsed.netloc or "Blog Article"
 
 
+def ensure_markdown_title(markdown, title):
+    markdown = markdown.strip()
+    title = " ".join((title or "").split())
+    if not title or markdown.startswith("# "):
+        return markdown
+    return f"# {title}\n\n{markdown}"
+
+
 def site_defaults(url):
     host = (urlparse(url).hostname or "").lower()
     if host == "spaces.ac.cn" or host.endswith(".spaces.ac.cn") or host == "kexue.fm" or host.endswith(".kexue.fm"):
@@ -205,7 +213,7 @@ def raw_html_markdown(payload, url, title_hint, excluded_tags, css_selector, exc
         "ok": True,
         "title": title,
         "url": url,
-        "markdown": markdown,
+        "markdown": ensure_markdown_title(markdown, title),
         "extractor": "crawl4ai-raw-html",
         "statusCode": status_code,
     }
@@ -255,7 +263,7 @@ async def browser_crawl_markdown(payload, url, title_hint, excluded_tags, word_c
         "ok": True,
         "title": result_title(result, title_hint, url),
         "url": url,
-        "markdown": markdown,
+        "markdown": ensure_markdown_title(markdown, result_title(result, title_hint, url)),
         "extractor": "crawl4ai-browser",
         "statusCode": getattr(result, "status_code", None),
     }

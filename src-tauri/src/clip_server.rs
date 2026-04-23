@@ -547,11 +547,12 @@ fn handle_blog(body: &str) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("Blog Article");
     let crawled_url = crawled["url"].as_str().unwrap_or(url);
+    let content = strip_leading_markdown_title(markdown);
 
     let clip_body = serde_json::json!({
         "title": crawled_title,
         "url": crawled_url,
-        "content": markdown,
+        "content": content,
         "projectPath": project_path,
         "assets": [],
     })
@@ -567,6 +568,18 @@ fn handle_blog(body: &str) -> String {
         response["extractor"] = serde_json::Value::String("crawl4ai-local".to_string());
     }
     response.to_string()
+}
+
+fn strip_leading_markdown_title(markdown: &str) -> String {
+    let trimmed = markdown.trim_start();
+    if !trimmed.starts_with("# ") {
+        return markdown.to_string();
+    }
+    let after_title = trimmed
+        .find('\n')
+        .map(|index| &trimmed[index + 1..])
+        .unwrap_or("");
+    after_title.trim_start_matches(['\r', '\n']).to_string()
 }
 
 fn call_crawl4ai_helper(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
