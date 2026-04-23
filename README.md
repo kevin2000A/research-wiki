@@ -364,38 +364,86 @@ The original is platform-agnostic (abstract pattern). We handle concrete cross-p
 
 ## Installation
 
-### Pre-built Binaries
+### Option 1: Pre-built Binaries
 
 Download from [Releases](https://github.com/nashsu/llm_wiki/releases):
+
 - **macOS**: `.dmg` (Apple Silicon + Intel)
 - **Windows**: `.msi`
 - **Linux**: `.deb` / `.AppImage`
 
-### Build from Source
+Install the app, launch it, then configure your LLM provider in **Settings**.
+
+### Option 2: Build from Source
+
+Prerequisites:
+
+- Node.js 20+
+- Rust 1.70+
+- Platform requirements for Tauri v2 on your OS
 
 ```bash
-# Prerequisites: Node.js 20+, Rust 1.70+
 git clone https://github.com/nashsu/llm_wiki.git
 cd llm_wiki
 npm install
-npm run tauri dev      # Development
-npm run tauri build    # Production build
+npm run tauri dev
 ```
 
-### Chrome Extension
+Create a production build:
+
+```bash
+npm run tauri build
+```
+
+### Option 3: Chrome Extension
 
 1. Open `chrome://extensions`
 2. Enable "Developer mode"
 3. Click "Load unpacked"
 4. Select the `extension/` directory
+5. Keep the LLM Wiki desktop app running while clipping pages; the extension talks to the app through the local clipping API.
 
-Blog clipping uses a local crawl4ai helper started by the LLM Wiki app. Install its Python dependencies once before queuing Blog URLs:
+### Blog / Article Clipping with crawl4ai
+
+Blog and article clipping uses a local `crawl4ai` helper started by the LLM Wiki app. Before queueing Blog URLs from the Chrome extension, install the Python helper dependencies once:
 
 ```bash
 bash scripts/setup-crawl4ai-helper.sh
 ```
 
-The setup script creates a local virtualenv at `~/.llm-wiki/crawl4ai-venv` and the app will use that interpreter automatically. To override it, set `LLM_WIKI_PYTHON` or `LLM_WIKI_CRAWL4AI_PYTHON`.
+The setup script:
+
+- Creates a local virtualenv at `~/.llm-wiki/crawl4ai-venv`
+- Installs `crawl4ai`
+- Runs `crawl4ai-setup`
+- Installs Playwright Chromium for browser-based extraction
+
+After setup, restart LLM Wiki. On launch, the app automatically starts the helper on `127.0.0.1:19828` using the installed virtualenv.
+
+Optional environment overrides:
+
+```bash
+# Use a different virtualenv location for the setup script
+export LLM_WIKI_CRAWL4AI_VENV="$HOME/.llm-wiki/crawl4ai-venv"
+
+# Use a specific Python when creating the virtualenv
+export LLM_WIKI_PYTHON="/path/to/python3.12"
+
+# Use a specific Python when the app starts the crawl4ai helper
+export LLM_WIKI_CRAWL4AI_PYTHON="/path/to/crawl4ai-venv/bin/python"
+```
+
+Then rerun:
+
+```bash
+bash scripts/setup-crawl4ai-helper.sh
+```
+
+Troubleshooting:
+
+- `crawl4ai helper is not running`: run `bash scripts/setup-crawl4ai-helper.sh`, then restart LLM Wiki.
+- Chromium or browser launch errors: rerun `bash scripts/setup-crawl4ai-helper.sh` to reinstall Playwright Chromium.
+- Chrome extension clipping fails: make sure the LLM Wiki desktop app is running, because the extension sends clips to the app's local API.
 
 ## Quick Start
 
