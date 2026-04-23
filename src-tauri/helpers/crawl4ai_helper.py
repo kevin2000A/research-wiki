@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import http.cookiejar
 import json
+import os
+import shutil
+import subprocess
+import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 
 DEFAULT_EXCLUDED_TAGS = ["header", "nav", "footer", "aside", "form"]
 DEFAULT_WORD_COUNT_THRESHOLD = 10
 DEFAULT_TIMEOUT_SECONDS = 120
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+SPACES_EXCLUDED_SELECTOR = "#content_tips,#pay,#how_to_cite"
 
 
 def json_bytes(payload):
@@ -42,39 +51,188 @@ def result_title(result, fallback_title, url):
     return parsed.netloc or "Blog Article"
 
 
-async def crawl_once(payload):
+def site_defaults(url):
+    host = (urlparse(url).hostname or "").lower()
+    if host == "spaces.ac.cn" or host.endswith(".spaces.ac.cn") or host == "kexue.fm" or host.endswith(".kexue.fm"):
+        return {
+            "cssSelector": "#PostContent",
+            "excludedSelector": SPACES_EXCLUDED_SELECTOR,
+        }
+    return {}
+
+
+def merged_option(payload, defaults, key):
+    value = payload.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return defaults.get(key, "")
+
+
+def fetch_with_cookie_retry(url):
+    curl_path = shutil.which("curl")
+    if curl_path:
+        return fetch_with_curl_cookie_retry(curl_path, url)
+
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = build_opener(HTTPCookieProcessor(cookie_jar))
+
+    def fetch_once():
+        request = Request(
+            url,
+            headers={
+                "User-Agent": DEFAULT_USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            },
+        )
+        try:
+            response = opener.open(request, timeout=30)
+            raw = response.read()
+            charset = response.headers.get_content_charset() or "utf-8"
+            return response.status, raw.decode(charset, errors="replace")
+        except HTTPError as exc:
+            raw = exc.read()
+            charset = exc.headers.get_content_charset() or "utf-8"
+            return exc.code, raw.decode(charset, errors="replace")
+        except URLError as exc:
+            raise RuntimeError(f"raw HTML fetch failed: {exc}") from exc
+
+    first_status, first_html = fetch_once()
+    second_status, second_html = fetch_once()
+    if len(second_html.strip()) >= len(first_html.strip()):
+        return second_status, second_html
+    return first_status, first_html
+
+
+def fetch_with_curl_cookie_retry(curl_path, url):
+    cookie_file = tempfile.NamedTemporaryFile(prefix="llmwiki-crawl4ai-cookies-", delete=False)
+    cookie_file.close()
     try:
-        from crawl4ai import AsyncWebCrawler
-        from crawl4ai.async_configs import BrowserConfig, CrawlerRunConfig, CacheMode
-    except Exception as exc:
-        raise RuntimeError(
-            "crawl4ai is not installed or initialized. Run: "
-            "python3 -m pip install -U crawl4ai && crawl4ai-setup && "
-            "python3 -m playwright install chromium"
-        ) from exc
+        def fetch_once():
+            marker = "\n__LLMWIKI_STATUS__:%{http_code}"
+            completed = subprocess.run(
+                [
+                    curl_path,
+                    "--silent",
+                    "--show-error",
+                    "--location",
+                    "--max-time",
+                    "30",
+                    "--user-agent",
+                    DEFAULT_USER_AGENT,
+                    "--header",
+                    "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "--header",
+                    "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8",
+                    "--cookie-jar",
+                    cookie_file.name,
+                    "--cookie",
+                    cookie_file.name,
+                    "--write-out",
+                    marker,
+                    url,
+                ],
+                check=True,
+                capture_output=True,
+            )
+            text = completed.stdout.decode("utf-8", errors="replace")
+            body, status = text.rsplit("\n__LLMWIKI_STATUS__:", 1)
+            return int(status.strip()), body
 
-    url = payload["url"].strip()
+        first_status, first_html = fetch_once()
+        second_status, second_html = fetch_once()
+        if len(second_html.strip()) >= len(first_html.strip()):
+            return second_status, second_html
+        return first_status, first_html
+    finally:
+        os.unlink(cookie_file.name)
+
+
+def extract_html_title(soup, fallback_title, url):
+    for selector, attr in [
+        ('meta[property="og:title"]', "content"),
+        ('meta[name="twitter:title"]', "content"),
+        ("title", None),
+    ]:
+        node = soup.select_one(selector)
+        if not node:
+            continue
+        value = node.get(attr, "") if attr else node.get_text(" ", strip=True)
+        value = value.strip()
+        if value:
+            return value
+    if fallback_title:
+        return fallback_title
     parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise RuntimeError("url must be http(s)")
+    return parsed.netloc or "Blog Article"
 
-    excluded_tags = payload.get("excludedTags") or DEFAULT_EXCLUDED_TAGS
-    word_count_threshold = payload.get("wordCountThreshold") or DEFAULT_WORD_COUNT_THRESHOLD
-    title_hint = (payload.get("title") or "").strip()
+
+def remove_noise(root, excluded_tags, excluded_selector):
+    for selector in ["script", "style"]:
+        for node in root.select(selector):
+            node.decompose()
+    for tag in excluded_tags:
+        for node in root.find_all(tag):
+            node.decompose()
+    if excluded_selector:
+        for node in root.select(excluded_selector):
+            node.decompose()
+
+
+def raw_html_markdown(payload, url, title_hint, excluded_tags, css_selector, excluded_selector):
+    from bs4 import BeautifulSoup
+    from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+
+    status_code, html = fetch_with_cookie_retry(url)
+    if len(html.strip()) < 200:
+        raise RuntimeError(f"raw HTML fetch returned too little content (HTTP {status_code}, {len(html)} bytes)")
+
+    soup = BeautifulSoup(html, "html.parser")
+    title = extract_html_title(soup, title_hint, url)
+    if css_selector:
+        root = soup.select_one(css_selector)
+        if root is None:
+            raise RuntimeError(f"raw HTML selector not found: {css_selector}")
+    else:
+        root = soup
+    remove_noise(root, excluded_tags, excluded_selector)
+
+    generator = DefaultMarkdownGenerator()
+    markdown = markdown_text(generator.generate_markdown(str(root), base_url=url)).strip()
+    if not markdown:
+        raise RuntimeError("raw HTML markdown was empty")
+    return {
+        "ok": True,
+        "title": title,
+        "url": url,
+        "markdown": markdown,
+        "extractor": "crawl4ai-raw-html",
+        "statusCode": status_code,
+    }
+
+
+async def browser_crawl_markdown(payload, url, title_hint, excluded_tags, word_count_threshold, css_selector, excluded_selector):
+    from crawl4ai import AsyncWebCrawler
+    from crawl4ai.async_configs import BrowserConfig, CrawlerRunConfig, CacheMode
 
     run_kwargs = {
         "cache_mode": CacheMode.BYPASS,
         "excluded_tags": excluded_tags,
         "word_count_threshold": int(word_count_threshold),
     }
-    css_selector = (payload.get("cssSelector") or "").strip()
     if css_selector:
         run_kwargs["css_selector"] = css_selector
+    if excluded_selector:
+        run_kwargs["excluded_selector"] = excluded_selector
     wait_for = (payload.get("waitFor") or "").strip()
     if wait_for:
         run_kwargs["wait_for"] = wait_for
 
-    browser_config = BrowserConfig(headless=True)
+    browser_config = BrowserConfig(
+        headless=True,
+        enable_stealth=True,
+        user_agent=DEFAULT_USER_AGENT,
+    )
     run_config = CrawlerRunConfig(**run_kwargs)
 
     async with AsyncWebCrawler(config=browser_config) as crawler:
@@ -98,7 +256,54 @@ async def crawl_once(payload):
         "title": result_title(result, title_hint, url),
         "url": url,
         "markdown": markdown,
+        "extractor": "crawl4ai-browser",
+        "statusCode": getattr(result, "status_code", None),
     }
+
+
+async def crawl_once(payload):
+    try:
+        import crawl4ai  # noqa: F401
+    except Exception as exc:
+        raise RuntimeError(
+            "crawl4ai is not installed or initialized. Run: "
+            "python3 -m pip install -U crawl4ai && crawl4ai-setup && "
+            "python3 -m playwright install chromium"
+        ) from exc
+
+    url = payload["url"].strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise RuntimeError("url must be http(s)")
+
+    defaults = site_defaults(url)
+    excluded_tags = payload.get("excludedTags") or DEFAULT_EXCLUDED_TAGS
+    word_count_threshold = payload.get("wordCountThreshold") or DEFAULT_WORD_COUNT_THRESHOLD
+    title_hint = (payload.get("title") or "").strip()
+    css_selector = merged_option(payload, defaults, "cssSelector")
+    excluded_selector = merged_option(payload, defaults, "excludedSelector")
+
+    try:
+        return raw_html_markdown(
+            payload,
+            url,
+            title_hint,
+            excluded_tags,
+            css_selector,
+            excluded_selector,
+        )
+    except Exception as raw_exc:
+        result = await browser_crawl_markdown(
+            payload,
+            url,
+            title_hint,
+            excluded_tags,
+            word_count_threshold,
+            css_selector,
+            excluded_selector,
+        )
+        result["rawHtmlError"] = str(raw_exc)
+        return result
 
 
 class Handler(BaseHTTPRequestHandler):
