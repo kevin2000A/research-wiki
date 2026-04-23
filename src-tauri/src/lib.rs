@@ -43,6 +43,7 @@ pub fn run() {
             commands::fs::find_related_wiki_pages,
             commands::fs::create_directory,
             commands::fs::reveal_path,
+            commands::fs::path_is_directory,
             commands::project::create_project,
             commands::project::open_project,
             clip_server_status,

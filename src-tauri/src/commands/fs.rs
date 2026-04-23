@@ -1113,6 +1113,17 @@ pub fn reveal_path(path: String) -> Result<(), String> {
     })
 }
 
+#[tauri::command]
+pub fn path_is_directory(path: String) -> Result<bool, String> {
+    run_guarded("path_is_directory", || {
+        let p = Path::new(&path);
+        if !p.exists() {
+            return Err(format!("Path does not exist: '{}'", path));
+        }
+        Ok(p.is_dir())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

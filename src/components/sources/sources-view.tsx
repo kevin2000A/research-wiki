@@ -2,11 +2,12 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import type { MouseEvent, ReactNode } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
 import { invoke } from "@tauri-apps/api/core"
+import { getCurrentWebview } from "@tauri-apps/api/webview"
 import { Plus, FileText, RefreshCw, BookOpen, Trash2, Folder, ChevronRight, ChevronDown, RotateCcw, Search } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { useWikiStore } from "@/stores/wiki-store"
-import { copyFile, listDirectory, readFile, deleteFile, findRelatedWikiPages, preprocessFile, createDirectory, revealPath } from "@/commands/fs"
+import { copyFile, listDirectory, readFile, deleteFile, findRelatedWikiPages, preprocessFile, createDirectory, revealPath, pathIsDirectory } from "@/commands/fs"
 import type { FileNode } from "@/types/wiki"
 import { enqueueIngest, enqueueBatch } from "@/lib/ingest-queue"
 import { useTranslation } from "react-i18next"
@@ -52,6 +53,7 @@ export function SourcesView() {
   const [statusFilter, setStatusFilter] = useState<SourceStatusFilter>("all")
   const [sortMode, setSortMode] = useState<SourceSortMode>("name")
   const [dropToast, setDropToast] = useState<DropToastState | null>(null)
+  const [draggingSources, setDraggingSources] = useState(false)
   const dropToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sourceFiles = useMemo(() => flattenSourceFiles(sources), [sources])
   const visibleSources = useMemo(() => (
@@ -89,6 +91,99 @@ export function SourcesView() {
   useEffect(() => {
     loadSources()
   }, [loadSources, dataVersion])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | null = null
+
+    getCurrentWebview().onDragDropEvent((event) => {
+      const payload = event.payload
+      if (payload.type === "enter" || payload.type === "over") {
+        setDraggingSources(true)
+      } else if (payload.type === "leave") {
+        setDraggingSources(false)
+      } else if (payload.type === "drop") {
+        setDraggingSources(false)
+        void importDroppedSourcePaths(payload.paths)
+      }
+    }).then((fn) => {
+      if (cancelled) fn()
+      else unlisten = fn
+    })
+
+    return () => {
+      cancelled = true
+      if (unlisten) unlisten()
+    }
+  }, [project, importing])
+
+  async function importSourceFiles(paths: string[]) {
+    if (!project) return
+    setImporting(true)
+    const pp = normalizePath(project.path)
+    try {
+      for (const sourcePath of paths) {
+        const originalName = getFileName(sourcePath) || "unknown"
+        const destPath = await getUniqueDestPath(`${pp}/raw/sources`, originalName)
+        await copyFile(sourcePath, destPath)
+        await preprocessFile(destPath)
+      }
+    } finally {
+      setImporting(false)
+      await loadSources()
+    }
+  }
+
+  async function importSourceFolder(folderPath: string) {
+    if (!project) return
+    setImporting(true)
+    const pp = normalizePath(project.path)
+    const folderName = getFileName(folderPath) || "imported"
+    const destDir = await getUniqueDestPath(`${pp}/raw/sources`, folderName)
+    try {
+      const copiedFiles: string[] = await invoke("copy_directory", {
+        source: folderPath,
+        destination: destDir,
+      })
+
+      console.log(`[Folder Import] Copied ${copiedFiles.length} files from ${folderName}`)
+      for (const filePath of copiedFiles) {
+        await preprocessFile(filePath)
+      }
+    } finally {
+      setImporting(false)
+      await loadSources()
+    }
+  }
+
+  async function importDroppedSourcePaths(paths: string[]) {
+    if (!project || importing) return
+    setImporting(true)
+    const pp = normalizePath(project.path)
+    try {
+      for (const sourcePath of paths) {
+        if (await pathIsDirectory(sourcePath)) {
+          const folderName = getFileName(sourcePath) || "imported"
+          const destDir = await getUniqueDestPath(`${pp}/raw/sources`, folderName)
+          const copiedFiles: string[] = await invoke("copy_directory", {
+            source: sourcePath,
+            destination: destDir,
+          })
+          for (const filePath of copiedFiles) {
+            await preprocessFile(filePath)
+          }
+        } else {
+          const originalName = getFileName(sourcePath) || "unknown"
+          const destPath = await getUniqueDestPath(`${pp}/raw/sources`, originalName)
+          await copyFile(sourcePath, destPath)
+          await preprocessFile(destPath)
+        }
+      }
+    } finally {
+      setImporting(false)
+      await loadSources()
+    }
+  }
 
   async function handleImport() {
     if (!project) return
@@ -130,25 +225,8 @@ export function SourcesView() {
     })
 
     if (!selected || selected.length === 0) return
-
-    setImporting(true)
-    const pp = normalizePath(project.path)
     const paths = Array.isArray(selected) ? selected : [selected]
-
-    for (const sourcePath of paths) {
-      const originalName = getFileName(sourcePath) || "unknown"
-      const destPath = await getUniqueDestPath(`${pp}/raw/sources`, originalName)
-      try {
-        await copyFile(sourcePath, destPath)
-        // Pre-process file (extract text from PDF, etc.) for instant preview later
-        preprocessFile(destPath).catch(() => {})
-      } catch (err) {
-        console.error(`Failed to import ${originalName}:`, err)
-      }
-    }
-
-    setImporting(false)
-    await loadSources()
+    await importSourceFiles(paths)
   }
 
   async function handleImportFolder() {
@@ -160,32 +238,7 @@ export function SourcesView() {
     })
 
     if (!selected || typeof selected !== "string") return
-
-    setImporting(true)
-    const pp = normalizePath(project.path)
-    const folderName = getFileName(selected) || "imported"
-    const destDir = `${pp}/raw/sources/${folderName}`
-
-    try {
-      // Recursively copy the folder
-      const copiedFiles: string[] = await invoke("copy_directory", {
-        source: selected,
-        destination: destDir,
-      })
-
-      console.log(`[Folder Import] Copied ${copiedFiles.length} files from ${folderName}`)
-
-      // Preprocess all files
-      for (const filePath of copiedFiles) {
-        preprocessFile(filePath).catch(() => {})
-      }
-
-      setImporting(false)
-      await loadSources()
-    } catch (err) {
-      console.error(`Failed to import folder:`, err)
-      setImporting(false)
-    }
+    await importSourceFolder(selected)
   }
 
   async function handleOpenSource(node: FileNode) {
@@ -512,7 +565,7 @@ export function SourcesView() {
   }, [])
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="relative flex h-full min-h-0 flex-col">
       <div className="shrink-0 space-y-2 border-b px-4 py-3">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-sm font-semibold">{t("sources.title")}</h2>
@@ -686,6 +739,12 @@ export function SourcesView() {
           onUndo={() => void handleUndoDrop()}
           onDismiss={() => setDropToast(null)}
         />
+      )}
+
+      {draggingSources && (
+        <div className="pointer-events-none absolute inset-3 z-40 flex items-center justify-center rounded-xl border-2 border-dashed border-primary bg-background/80 text-sm font-medium text-primary shadow-inner backdrop-blur-sm">
+          Drop files or folders to import
+        </div>
       )}
 
       <div className="shrink-0 border-t px-4 py-2 text-xs text-muted-foreground">
