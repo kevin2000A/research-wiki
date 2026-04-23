@@ -54,9 +54,18 @@ def result_title(result, fallback_title, url):
 def ensure_markdown_title(markdown, title):
     markdown = markdown.strip()
     title = " ".join((title or "").split())
-    if not title or markdown.startswith("# "):
+    if not title or has_initial_markdown_h1(markdown):
         return markdown
     return f"# {title}\n\n{markdown}"
+
+
+def has_initial_markdown_h1(markdown):
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("!["):
+            continue
+        return stripped.startswith("# ")
+    return False
 
 
 def site_defaults(url):
@@ -65,6 +74,10 @@ def site_defaults(url):
         return {
             "cssSelector": "#PostContent",
             "excludedSelector": SPACES_EXCLUDED_SELECTOR,
+        }
+    if host == "shashankshekhar.com" or host.endswith(".shashankshekhar.com"):
+        return {
+            "cssSelector": "div.prose",
         }
     return {}
 
@@ -157,6 +170,13 @@ def fetch_with_curl_cookie_retry(curl_path, url):
 
 
 def extract_html_title(soup, fallback_title, url):
+    for selector in ["article h1", "main h1", "h1"]:
+        node = soup.select_one(selector)
+        if node:
+            value = node.get_text(" ", strip=True).strip()
+            if value:
+                return value
+
     for selector, attr in [
         ('meta[property="og:title"]', "content"),
         ('meta[name="twitter:title"]', "content"),
@@ -187,6 +207,45 @@ def remove_noise(root, excluded_tags, excluded_selector):
             node.decompose()
 
 
+def class_names(node):
+    classes = node.get("class") or []
+    if isinstance(classes, str):
+        return classes.split()
+    return classes
+
+
+def preserve_tex_annotations(root):
+    from bs4 import NavigableString
+
+    for annotation in list(root.select('annotation[encoding="application/x-tex"]')):
+        tex = annotation.get_text("", strip=False).strip()
+        if not tex:
+            continue
+
+        math = annotation.find_parent("math")
+        if math is None:
+            continue
+
+        container = math
+        display = math.get("display") == "block"
+        for parent in math.parents:
+            classes = class_names(parent)
+            if "katex" in classes:
+                container = parent
+            if "katex-display" in classes:
+                container = parent
+                display = True
+                break
+            if parent is root:
+                break
+
+        if display:
+            replacement = f"\n\n$$\n{tex}\n$$\n\n"
+        else:
+            replacement = f"${tex}$"
+        container.replace_with(NavigableString(replacement))
+
+
 def raw_html_markdown(payload, url, title_hint, excluded_tags, css_selector, excluded_selector):
     from bs4 import BeautifulSoup
     from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
@@ -196,14 +255,15 @@ def raw_html_markdown(payload, url, title_hint, excluded_tags, css_selector, exc
         raise RuntimeError(f"raw HTML fetch returned too little content (HTTP {status_code}, {len(html)} bytes)")
 
     soup = BeautifulSoup(html, "html.parser")
-    title = extract_html_title(soup, title_hint, url)
     if css_selector:
         root = soup.select_one(css_selector)
         if root is None:
             raise RuntimeError(f"raw HTML selector not found: {css_selector}")
     else:
         root = soup
+    title = extract_html_title(soup, title_hint, url)
     remove_noise(root, excluded_tags, excluded_selector)
+    preserve_tex_annotations(root)
 
     generator = DefaultMarkdownGenerator()
     markdown = markdown_text(generator.generate_markdown(str(root), base_url=url)).strip()

@@ -573,7 +573,33 @@ fn handle_blog(body: &str) -> String {
 fn strip_leading_markdown_title(markdown: &str) -> String {
     let trimmed = markdown.trim_start();
     if !trimmed.starts_with("# ") {
-        return markdown.to_string();
+        let lines: Vec<&str> = trimmed.lines().collect();
+        let mut title_index = 0;
+        while title_index < lines.len() {
+            let line = lines[title_index].trim_start();
+            if line.is_empty() || line.starts_with("![") {
+                title_index += 1;
+                continue;
+            }
+            break;
+        }
+        if title_index >= lines.len() || !lines[title_index].trim_start().starts_with("# ") {
+            return markdown.to_string();
+        }
+        let before_title = lines[..title_index].join("\n");
+        let after_title = if title_index + 1 < lines.len() {
+            lines[title_index + 1..].join("\n")
+        } else {
+            String::new()
+        };
+        if before_title.trim().is_empty() {
+            return after_title.trim_start_matches(['\r', '\n']).to_string();
+        }
+        return format!(
+            "{}\n\n{}",
+            before_title.trim_end(),
+            after_title.trim_start_matches(['\r', '\n'])
+        );
     }
     let after_title = trimmed
         .find('\n')
