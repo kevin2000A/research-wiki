@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react"
+import { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import type { MouseEvent, ReactNode } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
 import { invoke } from "@tauri-apps/api/core"
@@ -21,6 +21,15 @@ type SourceContextMenuState = {
   y: number
   paths: string[]
 }
+type SourceMoveRecord = {
+  fromPath: string
+  fromRelPath: string
+  toPath: string
+}
+type DropToastState = {
+  id: number
+  records: SourceMoveRecord[]
+}
 
 export function SourcesView() {
   const { t } = useTranslation()
@@ -42,6 +51,8 @@ export function SourcesView() {
   const [searchQuery, setSearchQuery] = useState("")
   const [statusFilter, setStatusFilter] = useState<SourceStatusFilter>("all")
   const [sortMode, setSortMode] = useState<SourceSortMode>("name")
+  const [dropToast, setDropToast] = useState<DropToastState | null>(null)
+  const dropToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sourceFiles = useMemo(() => flattenSourceFiles(sources), [sources])
   const visibleSources = useMemo(() => (
     filterSourceTreeForView(sources, sourceStatuses, searchQuery, statusFilter)
@@ -197,20 +208,14 @@ export function SourcesView() {
   async function handleDelete(node: FileNode) {
     if (!project) return
     const pp = normalizePath(project.path)
-    const fileName = node.name
     const status = sourceStatuses[node.path] ?? "unprocessed"
     if (status === "dropped") {
       await handleRestore(node)
       return
     }
 
-    const confirmed = window.confirm(
-      t("sources.deleteConfirm", { name: fileName })
-    )
-    if (!confirmed) return
-
     try {
-      await dropSourceNode(pp, node)
+      const record = await dropSourceNode(pp, node)
       await refreshSourceState(pp)
       setSelectedPaths((prev) => {
         const next = new Set(prev)
@@ -225,6 +230,7 @@ export function SourcesView() {
       if (selectedFile === node.path) {
         setSelectedFile(null)
       }
+      showDropToast([record])
     } catch (err) {
       console.error("Failed to drop source:", err)
       window.alert(`Failed to drop: ${err}`)
@@ -236,16 +242,12 @@ export function SourcesView() {
     const selected = selectedSourceFiles.filter((node) => sourceStatuses[node.path] !== "dropped")
     if (selected.length === 0) return
 
-    const confirmed = window.confirm(
-      t("sources.deleteSelectedConfirm", { count: selected.length })
-    )
-    if (!confirmed) return
-
     setBatchDeleting(true)
     try {
       const pp = normalizePath(project.path)
+      const records: SourceMoveRecord[] = []
       for (const node of selected) {
-        await dropSourceNode(pp, node)
+        records.push(await dropSourceNode(pp, node))
       }
 
       await refreshSourceState(pp)
@@ -255,6 +257,7 @@ export function SourcesView() {
       if (selectedFile && selected.some((node) => node.path === selectedFile)) {
         setSelectedFile(null)
       }
+      showDropToast(records)
     } catch (err) {
       console.error("Failed to drop selected sources:", err)
       window.alert(`Failed to drop selected sources: ${err}`)
@@ -419,6 +422,27 @@ export function SourcesView() {
     await revealPath(node.path)
   }
 
+  function showDropToast(records: SourceMoveRecord[]) {
+    if (records.length === 0) return
+    if (dropToastTimer.current) clearTimeout(dropToastTimer.current)
+    setDropToast({ id: Date.now(), records })
+    dropToastTimer.current = setTimeout(() => setDropToast(null), 8000)
+  }
+
+  async function handleUndoDrop() {
+    if (!project || !dropToast) return
+    if (dropToastTimer.current) clearTimeout(dropToastTimer.current)
+    const pp = normalizePath(project.path)
+    const restoredPaths: string[] = []
+    for (const record of dropToast.records) {
+      restoredPaths.push(await undoDropMove(pp, record))
+    }
+    setDropToast(null)
+    await refreshSourceState(pp)
+    setSelectedPaths(new Set(restoredPaths))
+    setLastSelectedPath(restoredPaths[0] ?? null)
+  }
+
   const selectedCount = selectedSourceFiles.length
   const selectedDroppableCount = selectedSourceFiles
     .filter((node) => sourceStatuses[node.path] !== "dropped")
@@ -482,6 +506,10 @@ export function SourcesView() {
     window.addEventListener("pointerdown", handlePointerDown)
     return () => window.removeEventListener("pointerdown", handlePointerDown)
   }, [contextMenu])
+
+  useEffect(() => () => {
+    if (dropToastTimer.current) clearTimeout(dropToastTimer.current)
+  }, [])
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -652,6 +680,14 @@ export function SourcesView() {
         />
       )}
 
+      {dropToast && (
+        <DropUndoToast
+          count={dropToast.records.length}
+          onUndo={() => void handleUndoDrop()}
+          onDismiss={() => setDropToast(null)}
+        />
+      )}
+
       <div className="shrink-0 border-t px-4 py-2 text-xs text-muted-foreground">
         {t("sources.sourceCount", { count: countFiles(sources) })}
         {visibleCount !== sourceFiles.length && (
@@ -754,12 +790,15 @@ async function buildSourceStatuses(projectPath: string, nodes: FileNode[]): Prom
   return Object.fromEntries(entries)
 }
 
-async function dropSourceNode(projectPath: string, node: FileNode): Promise<string> {
+async function dropSourceNode(projectPath: string, node: FileNode): Promise<SourceMoveRecord> {
   const relPath = getSourceRelativePath(projectPath, node.path)
-  if (relPath === "drop" || relPath.startsWith("drop/")) return node.path
+  if (relPath === "drop" || relPath.startsWith("drop/")) {
+    return { fromPath: node.path, fromRelPath: relPath, toPath: node.path }
+  }
 
   const destRelPath = `drop/${relPath}`
-  return moveSourceNodeToRelativePath(projectPath, node, destRelPath)
+  const toPath = await moveSourceNodeToRelativePath(projectPath, node, destRelPath)
+  return { fromPath: node.path, fromRelPath: relPath, toPath }
 }
 
 async function restoreSourceNode(projectPath: string, node: FileNode): Promise<string> {
@@ -769,6 +808,12 @@ async function restoreSourceNode(projectPath: string, node: FileNode): Promise<s
 
   const restoredRelPath = relPath.slice(prefix.length)
   return moveSourceNodeToRelativePath(projectPath, node, restoredRelPath)
+}
+
+async function undoDropMove(projectPath: string, record: SourceMoveRecord): Promise<string> {
+  const originalName = getFileName(record.fromRelPath) || getFileName(record.fromPath) || getFileName(record.toPath)
+  const node = { name: originalName, path: record.toPath, is_dir: false }
+  return moveSourceNodeToRelativePath(projectPath, node, record.fromRelPath)
 }
 
 async function moveSourceNodeToRelativePath(projectPath: string, node: FileNode, destRelPath: string): Promise<string> {
@@ -796,6 +841,28 @@ function parentRelativePath(relPath: string): string {
 function isDroppedSource(projectPath: string, filePath: string): boolean {
   const relPath = getSourceRelativePath(projectPath, filePath)
   return relPath === "drop" || relPath.startsWith("drop/")
+}
+
+function DropUndoToast({
+  count,
+  onUndo,
+  onDismiss,
+}: {
+  count: number
+  onUndo: () => void
+  onDismiss: () => void
+}) {
+  return (
+    <div className="fixed bottom-10 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-lg border bg-background px-4 py-2 text-sm shadow-xl">
+      <span>Moved {count} {count === 1 ? "file" : "files"} to Drop</span>
+      <button type="button" className="font-medium text-primary hover:underline" onClick={onUndo}>
+        Undo
+      </button>
+      <button type="button" className="text-muted-foreground hover:text-foreground" onClick={onDismiss}>
+        Dismiss
+      </button>
+    </div>
+  )
 }
 
 function StatusFilterChips({
