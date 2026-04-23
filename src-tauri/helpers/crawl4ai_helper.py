@@ -89,6 +89,12 @@ def merged_option(payload, defaults, key):
     return defaults.get(key, "")
 
 
+def is_x_status_url(url):
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return host in ("x.com", "twitter.com") or host.endswith(".x.com") or host.endswith(".twitter.com")
+
+
 def fetch_with_cookie_retry(url):
     curl_path = shutil.which("curl")
     if curl_path:
@@ -207,6 +213,14 @@ def remove_noise(root, excluded_tags, excluded_selector):
             node.decompose()
 
 
+def reject_known_stub_page(url, soup):
+    if not is_x_status_url(url):
+        return
+    page_text = soup.get_text(" ", strip=True)
+    if "JavaScript" in page_text and ("disabled" in page_text or "不可用" in page_text):
+        raise RuntimeError("raw HTML returned X JavaScript-disabled shell")
+
+
 def class_names(node):
     classes = node.get("class") or []
     if isinstance(classes, str):
@@ -255,6 +269,7 @@ def raw_html_markdown(payload, url, title_hint, excluded_tags, css_selector, exc
         raise RuntimeError(f"raw HTML fetch returned too little content (HTTP {status_code}, {len(html)} bytes)")
 
     soup = BeautifulSoup(html, "html.parser")
+    reject_known_stub_page(url, soup)
     if css_selector:
         root = soup.select_one(css_selector)
         if root is None:
