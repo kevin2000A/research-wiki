@@ -350,8 +350,7 @@ async def crawl_once(payload):
     except Exception as exc:
         raise RuntimeError(
             "crawl4ai is not installed or initialized. Run: "
-            "python3 -m pip install -U crawl4ai && crawl4ai-setup && "
-            "python3 -m playwright install chromium"
+            "bash scripts/setup-crawl4ai-helper.sh"
         ) from exc
 
     url = payload["url"].strip()

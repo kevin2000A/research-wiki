@@ -393,11 +393,9 @@ Blog clipping uses a local crawl4ai helper started by the LLM Wiki app. Install 
 
 ```bash
 bash scripts/setup-crawl4ai-helper.sh
-# equivalent:
-# python3 -m pip install -U crawl4ai
-# crawl4ai-setup
-# python3 -m playwright install chromium
 ```
+
+The setup script creates a local virtualenv at `~/.llm-wiki/crawl4ai-venv` and the app will use that interpreter automatically. To override it, set `LLM_WIKI_PYTHON` or `LLM_WIKI_CRAWL4AI_PYTHON`.
 
 ## Quick Start
 

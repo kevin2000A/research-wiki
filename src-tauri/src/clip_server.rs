@@ -613,7 +613,7 @@ fn call_crawl4ai_helper(payload: &serde_json::Value) -> Result<serde_json::Value
     let addr = SocketAddr::from(([127, 0, 0, 1], CRAWL4AI_HELPER_PORT));
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e| {
         format!(
-            "crawl4ai helper is not running on http://127.0.0.1:{}. Install dependencies with: python3 -m pip install -U crawl4ai && crawl4ai-setup && python3 -m playwright install chromium. Connection error: {}",
+            "crawl4ai helper is not running on http://127.0.0.1:{}. Install dependencies with: bash scripts/setup-crawl4ai-helper.sh. Connection error: {}",
             CRAWL4AI_HELPER_PORT, e
         )
     })?;

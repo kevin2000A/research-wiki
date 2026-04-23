@@ -393,11 +393,9 @@ Blog 剪藏使用由 LLM Wiki 应用启动的本地 crawl4ai helper。排队 Blo
 
 ```bash
 bash scripts/setup-crawl4ai-helper.sh
-# 等价命令：
-# python3 -m pip install -U crawl4ai
-# crawl4ai-setup
-# python3 -m playwright install chromium
 ```
+
+安装脚本会在 `~/.llm-wiki/crawl4ai-venv` 创建本地虚拟环境，应用会自动优先使用这个解释器。如需覆盖，可设置 `LLM_WIKI_PYTHON` 或 `LLM_WIKI_CRAWL4AI_PYTHON`。
 
 ## 快速开始
 
