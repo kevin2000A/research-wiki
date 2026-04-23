@@ -12,5 +12,7 @@ pub struct FileNode {
     pub path: String,
     pub is_dir: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<FileNode>>,
 }

@@ -7,6 +7,7 @@ export interface FileNode {
   name: string
   path: string
   is_dir: boolean
+  modified_ms?: number
   children?: FileNode[]
 }
 

@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Read as IoRead;
 use std::path::Path;
 use std::process::Command;
+use std::time::UNIX_EPOCH;
 
 use calamine::{Reader, open_workbook_auto, Data};
 
@@ -864,6 +865,11 @@ fn build_tree(dir: &Path, depth: usize, max_depth: usize) -> Result<Vec<FileNode
         // fail to match Rust-returned `\` paths.
         let path_str = entry_path.to_string_lossy().replace('\\', "/");
         let is_dir = entry_path.is_dir();
+        let modified_ms = fs::metadata(&entry_path)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64);
 
         let children = if is_dir {
             let kids = build_tree(&entry_path, depth + 1, max_depth)?;
@@ -880,6 +886,7 @@ fn build_tree(dir: &Path, depth: usize, max_depth: usize) -> Result<Vec<FileNode
             name,
             path: path_str,
             is_dir,
+            modified_ms,
             children,
         });
     }
