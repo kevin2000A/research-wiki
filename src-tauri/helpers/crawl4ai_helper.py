@@ -176,11 +176,14 @@ def fetch_with_curl_cookie_retry(curl_path, url):
 
 
 def extract_html_title(soup, fallback_title, url):
+    fallback_title = (fallback_title or "").strip()
     for selector in ["article h1", "main h1", "h1"]:
         node = soup.select_one(selector)
         if node:
             value = node.get_text(" ", strip=True).strip()
             if value:
+                if fallback_title and len(value) < 20 and value.lower() in fallback_title.lower():
+                    return fallback_title
                 return value
 
     for selector, attr in [
