@@ -513,7 +513,13 @@ fn handle_blog(body: &str) -> String {
         crawl_payload.insert("title".to_string(), serde_json::Value::String(title.to_string()));
     }
     if let Some(options) = parsed["crawlOptions"].as_object() {
-        for key in ["cssSelector", "waitFor", "excludedTags", "wordCountThreshold"] {
+        for key in [
+            "cssSelector",
+            "excludedSelector",
+            "waitFor",
+            "excludedTags",
+            "wordCountThreshold",
+        ] {
             if let Some(value) = options.get(key) {
                 crawl_payload.insert(key.to_string(), value.clone());
             }
