@@ -1,5 +1,5 @@
 import { useWikiStore } from "@/stores/wiki-store"
-import { detectLanguage } from "./detect-language"
+import { detectLanguage, detectSourceLanguage } from "./detect-language"
 
 /**
  * Get the effective output language for LLM content generation.
@@ -12,7 +12,7 @@ export function getOutputLanguage(fallbackText: string = ""): string {
   if (configured && configured !== "auto") {
     return configured
   }
-  return detectLanguage(fallbackText || "English")
+  return detectSourceLanguage(fallbackText || "English")
 }
 
 /**

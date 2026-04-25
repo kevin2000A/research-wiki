@@ -46,6 +46,108 @@ export function detectLanguage(text: string): string {
   return "English"
 }
 
+/**
+ * More conservative language inference for source documents used during ingest.
+ * Academic markdown/PDF text often contains short multilingual fragments,
+ * citations, frontmatter, and markup that can trick stopword-based detection.
+ * For likely academic sources, default to English unless there is strong
+ * non-English evidence.
+ */
+export function detectSourceLanguage(text: string): string {
+  const cleaned = normalizeForSourceLanguageDetection(text)
+  const strong = detectStrongLatinLanguage(cleaned)
+  if (strong) return strong
+  const detected = detectLanguage(cleaned)
+  if (detected === "English") return detected
+
+  if (isLikelyAcademicSource(text) && isMostlyAscii(cleaned) && !hasStrongMarkersForLanguage(cleaned, detected)) {
+    return "English"
+  }
+
+  return detected
+}
+
+function detectStrongLatinLanguage(text: string): string | null {
+  const lower = text.toLowerCase()
+
+  if (/[ñ¿¡]/.test(lower) || (/[áéíóú]/.test(lower) && /\b(el|los|las|del|por|como|resultados)\b/.test(lower))) {
+    return "Spanish"
+  }
+  if (/[àâçéèêëîïôùûüÿœæ]/.test(lower) && /\b(le|la|les|des|une|est)\b/.test(lower)) {
+    return "French"
+  }
+  if (/[äöüß]/.test(lower) && /\b(und|der|die|das|ist)\b/.test(lower)) {
+    return "German"
+  }
+  if (/[ãõç]/.test(lower) && /\b(o|os|as|não|uma|que)\b/.test(lower)) {
+    return "Portuguese"
+  }
+
+  return null
+}
+
+function normalizeForSourceLanguageDetection(text: string): string {
+  let cleaned = text
+    // Remove YAML frontmatter
+    .replace(/^---\n[\s\S]*?\n---\n?/, "")
+    // Strip fenced code blocks
+    .replace(/```[\s\S]*?```/g, " ")
+    // Strip inline code / math
+    .replace(/`[^`\n]*`/g, " ")
+    .replace(/\$\$[\s\S]*?\$\$/g, " ")
+    .replace(/\$[^$\n]*\$/g, " ")
+    // Strip URLs and markdown links/images
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/!?\[[^\]]*?\]\([^)]+?\)/g, " ")
+    // Strip obvious citation noise
+    .replace(/\[(?:\d+(?:,\s*\d+)*)\]/g, " ")
+    .replace(/\b(?:doi|arxiv|abs|pdf|url):\S+/gi, " ")
+
+  // Prefer the more contentful early body; references often contain many
+  // multilingual names and venue strings.
+  const refIndex = cleaned.search(/\n#{1,3}\s*(references|bibliography)\b/i)
+  if (refIndex > 0) cleaned = cleaned.slice(0, refIndex)
+
+  return cleaned.replace(/\s+/g, " ").trim().slice(0, 4000)
+}
+
+function isLikelyAcademicSource(text: string): boolean {
+  return /(^|\n)type:\s*arxiv-paper\b/i.test(text)
+    || /(^|\n)arxiv_id:\s*/i.test(text)
+    || /(^|\n)##\s+(Paper Content|Original Artifact|Abstract|Introduction|Method|Experiments|References)\b/i.test(text)
+    || /\b(arxiv|abstract|introduction|method|experiments|appendix|references)\b/i.test(text.slice(0, 3000))
+}
+
+function isMostlyAscii(text: string): boolean {
+  const visible = Array.from(text).filter((ch) => !/\s/.test(ch))
+  if (visible.length === 0) return true
+  const ascii = visible.filter((ch) => (ch.codePointAt(0) ?? 0) < 0x80).length
+  return ascii / visible.length >= 0.98
+}
+
+function hasStrongMarkersForLanguage(text: string, lang: string): boolean {
+  switch (lang) {
+    case "Spanish":
+      return /[ñáéíóú¿¡]/i.test(text)
+    case "French":
+      return /[àâçéèêëîïôùûüÿœæ]/i.test(text)
+    case "German":
+      return /[äöüß]/i.test(text)
+    case "Portuguese":
+      return /[ãõçáéíóúâêô]/i.test(text)
+    case "Italian":
+      return /[àèéìíîòóù]/i.test(text)
+    case "Turkish":
+      return /[ğışİŞĞ]/i.test(text)
+    case "Polish":
+      return /[ąćęłńóśźż]/i.test(text)
+    case "Vietnamese":
+      return /[ảạắằẳẵặấầẩẫậđẻẽẹếềểễệỉĩịỏọốồổỗộơớờởỡợủũụưứừửữựỷỹỵ]/i.test(text)
+    default:
+      return false
+  }
+}
+
 function getScript(cp: number): string | null {
   // CJK Unified Ideographs (Chinese/Japanese Kanji)
   if ((cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0x3400 && cp <= 0x4DBF) ||

@@ -24,6 +24,22 @@ describe("getOutputLanguage", () => {
     expect(getOutputLanguage("注意力机制是什么")).toBe("Chinese")
   })
 
+  it("auto mode treats arXiv-style academic markdown conservatively and stays in English", () => {
+    useWikiStore.getState().setOutputLanguage("auto")
+    const academic = [
+      "---",
+      "type: arxiv-paper",
+      'title: "Reasoning at Scale"',
+      "arxiv_id: 2512.20856",
+      "---",
+      "",
+      "## Abstract",
+      "We analyze long-context reasoning systems and expert routing.",
+      "Copied metadata may contain el and los, but the document is otherwise English.",
+    ].join("\n")
+    expect(getOutputLanguage(academic)).toBe("English")
+  })
+
   it("auto mode with empty fallback defaults to English", () => {
     useWikiStore.getState().setOutputLanguage("auto")
     expect(getOutputLanguage("")).toBe("English")

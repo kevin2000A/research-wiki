@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { detectLanguage } from "./detect-language"
+import { detectLanguage, detectSourceLanguage } from "./detect-language"
 
 describe("detectLanguage", () => {
   describe("defaults", () => {
@@ -99,5 +99,33 @@ describe("detectLanguage", () => {
     it("handles very long pure-ASCII strings", () => {
       expect(detectLanguage("a".repeat(10000))).toBe("English")
     })
+  })
+})
+
+describe("detectSourceLanguage", () => {
+  it("keeps arXiv-style academic markdown in English when Spanish stopwords appear incidentally", () => {
+    const academic = [
+      "---",
+      "type: arxiv-paper",
+      'title: "Efficient Reasoning for Long Context Models"',
+      "arxiv_id: 2512.20856",
+      "---",
+      "",
+      "# Efficient Reasoning for Long Context Models",
+      "",
+      "## Abstract",
+      "We study long-context reasoning in large language models.",
+      "The model predicts tokens over long windows and uses expert routing.",
+      "The appendix includes phrases like el model and los tokens in copied metadata.",
+      "",
+      "## Introduction",
+      "Our experiments evaluate accuracy, efficiency, and robustness.",
+    ].join("\n")
+    expect(detectSourceLanguage(academic)).toBe("English")
+  })
+
+  it("still detects genuine Spanish when strong Spanish markers are present", () => {
+    const spanish = "Introducción: ¿Cómo funciona el modelo? Los resultados muestran una mejora rápida en precisión y razonamiento."
+    expect(detectSourceLanguage(spanish)).toBe("Spanish")
   })
 })
