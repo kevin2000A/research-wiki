@@ -4,6 +4,7 @@ use std::thread;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
+use reqwest::blocking::Client;
 use flate2::read::GzDecoder;
 use base64::{engine::general_purpose, Engine as _};
 use tiny_http::{Header, Method, Response, Server};
@@ -277,6 +278,48 @@ pub fn start_clip_server() {
                     } else {
                         500
                     };
+                    let mut response = Response::from_string(result).with_status_code(status);
+                    for h in &cors_headers {
+                        response.add_header(h.clone());
+                    }
+                    let _ = request.respond(response);
+                }
+                (&Method::Post, "/arxiv/search-titles") => {
+                    let mut body = String::new();
+                    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+                        let err =
+                            format!(r#"{{"ok":false,"error":"Failed to read body: {}"}}"#, e);
+                        let mut response = Response::from_string(err).with_status_code(400);
+                        for h in &cors_headers {
+                            response.add_header(h.clone());
+                        }
+                        let _ = request.respond(response);
+                        continue;
+                    }
+
+                    let result = handle_arxiv_search_titles(&body);
+                    let status = if result.contains(r#""ok":true"#) { 200 } else { 500 };
+                    let mut response = Response::from_string(result).with_status_code(status);
+                    for h in &cors_headers {
+                        response.add_header(h.clone());
+                    }
+                    let _ = request.respond(response);
+                }
+                (&Method::Post, "/arxiv/import") => {
+                    let mut body = String::new();
+                    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+                        let err =
+                            format!(r#"{{"ok":false,"error":"Failed to read body: {}"}}"#, e);
+                        let mut response = Response::from_string(err).with_status_code(400);
+                        for h in &cors_headers {
+                            response.add_header(h.clone());
+                        }
+                        let _ = request.respond(response);
+                        continue;
+                    }
+
+                    let result = handle_arxiv_import(&body);
+                    let status = if result.contains(r#""ok":true"#) { 200 } else { 500 };
                     let mut response = Response::from_string(result).with_status_code(status);
                     for h in &cors_headers {
                         response.add_header(h.clone());
@@ -1185,6 +1228,321 @@ fn handle_paper(body: &str) -> String {
         "artifactKind": artifact_kind,
         "autoIngest": false,
     }).to_string()
+}
+
+fn handle_arxiv_search_titles(body: &str) -> String {
+    let parsed: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return format!(r#"{{"ok":false,"error":"Invalid JSON: {}"}}"#, e),
+    };
+    let titles = match parsed["titles"].as_array() {
+        Some(items) => items
+            .iter()
+            .filter_map(|item| item.as_str())
+            .map(|title| title.trim().to_string())
+            .filter(|title| !title.is_empty())
+            .collect::<Vec<_>>(),
+        None => return r#"{"ok":false,"error":"titles[] is required"}"#.to_string(),
+    };
+
+    let client = match http_client() {
+        Ok(client) => client,
+        Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+    };
+
+    let mut results = Vec::new();
+    for title in titles {
+        match search_arxiv_candidates(&client, &title, 3) {
+            Ok(candidates) => results.push(serde_json::json!({
+                "queryTitle": title,
+                "candidates": candidates,
+            })),
+            Err(error) => {
+                results.push(serde_json::json!({
+                    "queryTitle": title,
+                    "candidates": [],
+                    "error": error,
+                }));
+            }
+        }
+    }
+
+    serde_json::json!({
+        "ok": true,
+        "results": results,
+    }).to_string()
+}
+
+fn handle_arxiv_import(body: &str) -> String {
+    let parsed: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return format!(r#"{{"ok":false,"error":"Invalid JSON: {}"}}"#, e),
+    };
+    let project_path = match parsed["projectPath"].as_str() {
+        Some(p) if !p.is_empty() => p.replace('\\', "/"),
+        _ => return r#"{"ok":false,"error":"projectPath is required"}"#.to_string(),
+    };
+    let arxiv_id = match parsed["arxivId"].as_str() {
+        Some(id) if !id.is_empty() => id.trim(),
+        _ => return r#"{"ok":false,"error":"arxivId is required"}"#.to_string(),
+    };
+    let paper_title = parsed["paperTitle"].as_str().unwrap_or("").trim().to_string();
+
+    let client = match http_client() {
+        Ok(client) => client,
+        Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+    };
+    let urls = arxiv_urls(arxiv_id);
+
+    match download_text(&client, &urls.arxiv2md_markdown) {
+        Ok(markdown) if !markdown.trim().is_empty() => {
+            let metadata_title = download_text(&client, &urls.arxiv2md_json)
+                .ok()
+                .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                .and_then(|json| json["title"].as_str().map(|value| value.trim().to_string()))
+                .filter(|value| !value.is_empty());
+
+            let payload = serde_json::json!({
+                "projectPath": project_path,
+                "arxivId": arxiv_id,
+                "paperTitle": if paper_title.is_empty() { metadata_title.unwrap_or_else(|| format!("arXiv {}", arxiv_id)) } else { paper_title },
+                "paperUrl": urls.abs,
+                "sourceUrl": urls.arxiv2md_markdown,
+                "artifactKind": "arxiv2md",
+                "mimeType": "text/markdown",
+                "fileName": format!("{}-arxiv2md.md", sanitize_file_name(&arxiv_id.replace('/', "-"))),
+                "dataBase64": general_purpose::STANDARD.encode(markdown.as_bytes()),
+                "arxivSettings": {
+                    "removeRefs": false,
+                    "removeToc": false,
+                    "removeCitations": false
+                }
+            });
+            return handle_paper(&payload.to_string());
+        }
+        Ok(_) => {}
+        Err(_) => {}
+    }
+
+    match download_bytes(&client, &urls.pdf) {
+        Ok(bytes) => {
+            let payload = serde_json::json!({
+                "projectPath": project_path,
+                "arxivId": arxiv_id,
+                "paperTitle": if paper_title.is_empty() { format!("arXiv {}", arxiv_id) } else { paper_title },
+                "paperUrl": urls.abs,
+                "sourceUrl": urls.pdf,
+                "artifactKind": "pdf",
+                "mimeType": "application/pdf",
+                "fileName": format!("{}.pdf", sanitize_file_name(&arxiv_id.replace('/', "-"))),
+                "dataBase64": general_purpose::STANDARD.encode(&bytes),
+                "arxivSettings": {
+                    "removeRefs": false,
+                    "removeToc": false,
+                    "removeCitations": false
+                }
+            });
+            handle_paper(&payload.to_string())
+        }
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to import arXiv {}: {}", arxiv_id, error),
+        }).to_string(),
+    }
+}
+
+struct ArxivUrls {
+    abs: String,
+    arxiv2md_markdown: String,
+    arxiv2md_json: String,
+    pdf: String,
+}
+
+fn arxiv_urls(arxiv_id: &str) -> ArxivUrls {
+    let abs = format!("https://arxiv.org/abs/{}", arxiv_id);
+    let encoded = arxiv_id
+        .split('/')
+        .map(|part| url_encode_component(part))
+        .collect::<Vec<_>>()
+        .join("/");
+    let common = format!("url={}&remove_refs=false&remove_toc=false&remove_citations=false", url_encode_component(&abs));
+    ArxivUrls {
+        abs,
+        arxiv2md_markdown: format!("{}?{}", ARXIV2MD_MARKDOWN_API, common),
+        arxiv2md_json: format!("{}?{}", ARXIV2MD_METADATA_API, common),
+        pdf: format!("https://arxiv.org/pdf/{}.pdf", encoded),
+    }
+}
+
+fn http_client() -> Result<Client, String> {
+    Client::builder()
+        .user_agent("LLM Wiki/0.3.5")
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+}
+
+fn download_text(client: &Client, url: &str) -> Result<String, String> {
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("GET {} failed: {}", url, e))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("GET {} returned HTTP {}", url, status.as_u16()));
+    }
+    response.text().map_err(|e| format!("Reading text from {} failed: {}", url, e))
+}
+
+fn download_bytes(client: &Client, url: &str) -> Result<Vec<u8>, String> {
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("GET {} failed: {}", url, e))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("GET {} returned HTTP {}", url, status.as_u16()));
+    }
+    response.bytes()
+        .map(|bytes| bytes.to_vec())
+        .map_err(|e| format!("Reading bytes from {} failed: {}", url, e))
+}
+
+fn search_arxiv_candidates(client: &Client, title: &str, max_results: usize) -> Result<Vec<serde_json::Value>, String> {
+    let response = client
+        .get("https://export.arxiv.org/api/query")
+        .query(&[
+            ("search_query", format!("ti:\"{}\"", title)),
+            ("start", "0".to_string()),
+            ("max_results", max_results.to_string()),
+        ])
+        .send()
+        .map_err(|e| format!("arXiv API request failed: {}", e))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("arXiv API returned HTTP {}", status.as_u16()));
+    }
+
+    let xml = response.text().map_err(|e| format!("Failed to read arXiv API response: {}", e))?;
+    let mut parsed = parse_arxiv_feed(&xml);
+    for item in &mut parsed {
+        let candidate_title = item["title"].as_str().unwrap_or("");
+        item["score"] = serde_json::json!(title_similarity(title, candidate_title));
+    }
+    parsed.sort_by(|a, b| {
+        let score_a = a["score"].as_f64().unwrap_or(0.0);
+        let score_b = b["score"].as_f64().unwrap_or(0.0);
+        score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(parsed)
+}
+
+fn parse_arxiv_feed(xml: &str) -> Vec<serde_json::Value> {
+    let mut results = Vec::new();
+    let entry_start = "<entry>";
+    let entry_end = "</entry>";
+    let mut cursor = xml;
+    while let Some(start) = cursor.find(entry_start) {
+        let after_start = &cursor[start + entry_start.len()..];
+        let Some(end) = after_start.find(entry_end) else { break };
+        let entry = &after_start[..end];
+        cursor = &after_start[end + entry_end.len()..];
+
+        let id = extract_xml_tag(entry, "id").unwrap_or_default();
+        let title = decode_xml_entities(&extract_xml_tag(entry, "title").unwrap_or_default())
+            .replace('\n', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let summary = decode_xml_entities(&extract_xml_tag(entry, "summary").unwrap_or_default())
+            .replace('\n', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if title.is_empty() || id.is_empty() {
+            continue;
+        }
+        let arxiv_id = id
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        results.push(serde_json::json!({
+            "arxivId": arxiv_id,
+            "title": title,
+            "paperUrl": id,
+            "summary": summary,
+            "score": 0.0,
+        }));
+    }
+    results
+}
+
+fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let start = xml.find(&open)?;
+    let after = &xml[start + open.len()..];
+    let end = after.find(&close)?;
+    Some(after[..end].to_string())
+}
+
+fn decode_xml_entities(text: &str) -> String {
+    text
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
+fn url_encode_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => encoded.push(byte as char),
+            _ => encoded.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+    encoded
+}
+
+fn title_similarity(query: &str, candidate: &str) -> f64 {
+    let query_norm = normalize_title_for_match(query);
+    let candidate_norm = normalize_title_for_match(candidate);
+    if query_norm.is_empty() || candidate_norm.is_empty() {
+        return 0.0;
+    }
+    if query_norm == candidate_norm {
+        return 1.0;
+    }
+
+    let query_words: std::collections::BTreeSet<_> = query_norm.split_whitespace().collect();
+    let candidate_words: std::collections::BTreeSet<_> = candidate_norm.split_whitespace().collect();
+    let overlap = query_words.intersection(&candidate_words).count() as f64;
+    let denom = query_words.len().max(candidate_words.len()) as f64;
+    let jaccard = if denom == 0.0 { 0.0 } else { overlap / denom };
+
+    let prefix_bonus = if candidate_norm.starts_with(&query_norm) || query_norm.starts_with(&candidate_norm) {
+        0.15
+    } else {
+        0.0
+    };
+
+    (jaccard + prefix_bonus).min(0.99)
+}
+
+fn normalize_title_for_match(value: &str) -> String {
+    value
+        .to_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 struct ArxivSourceParse {

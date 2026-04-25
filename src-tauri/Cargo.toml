@@ -39,6 +39,7 @@ lancedb = "0.27.2"
 arrow-array = "57"
 arrow-schema = "57"
 futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

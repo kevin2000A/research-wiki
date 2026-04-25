@@ -6,10 +6,12 @@ import { getCurrentWebview } from "@tauri-apps/api/webview"
 import { Plus, FileText, RefreshCw, BookOpen, Trash2, Folder, ChevronRight, ChevronDown, RotateCcw, Search } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { ReferenceImportDialog } from "@/components/sources/reference-import-dialog"
 import { useWikiStore } from "@/stores/wiki-store"
-import { copyFile, listDirectory, readFile, deleteFile, findRelatedWikiPages, preprocessFile, createDirectory, revealPath, pathIsDirectory } from "@/commands/fs"
+import { copyFile, listDirectory, readFile, writeFile, deleteFile, findRelatedWikiPages, preprocessFile, createDirectory, revealPath, pathIsDirectory } from "@/commands/fs"
 import type { FileNode } from "@/types/wiki"
 import { enqueueIngest, enqueueBatch } from "@/lib/ingest-queue"
+import { removeFromIngestCache } from "@/lib/ingest-cache"
 import { useTranslation } from "react-i18next"
 import { normalizePath, getFileName } from "@/lib/path-utils"
 import { cn } from "@/lib/utils"
@@ -31,6 +33,10 @@ type DropToastState = {
   id: number
   records: SourceMoveRecord[]
 }
+type ReferenceDialogState = {
+  node: FileNode
+  content: string
+}
 
 export function SourcesView() {
   const { t } = useTranslation()
@@ -45,6 +51,7 @@ export function SourcesView() {
   const [queueingPath, setQueueingPath] = useState<string | null>(null)
   const [batchQueueing, setBatchQueueing] = useState(false)
   const [batchDeleting, setBatchDeleting] = useState(false)
+  const [permanentlyDeletingPath, setPermanentlyDeletingPath] = useState<string | null>(null)
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set())
   const [lastSelectedPath, setLastSelectedPath] = useState<string | null>(null)
   const [sourceStatuses, setSourceStatuses] = useState<Record<string, SourceStatus>>({})
@@ -54,6 +61,7 @@ export function SourcesView() {
   const [sortMode, setSortMode] = useState<SourceSortMode>("name")
   const [dropToast, setDropToast] = useState<DropToastState | null>(null)
   const [draggingSources, setDraggingSources] = useState(false)
+  const [referenceDialog, setReferenceDialog] = useState<ReferenceDialogState | null>(null)
   const dropToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sourceFiles = useMemo(() => flattenSourceFiles(sources), [sources])
   const visibleSources = useMemo(() => (
@@ -251,6 +259,16 @@ export function SourcesView() {
     }
   }
 
+  async function handleExtractReferences(node: FileNode) {
+    try {
+      const content = await readFile(node.path)
+      setReferenceDialog({ node, content })
+    } catch (err) {
+      console.error("Failed to read source for reference extraction:", err)
+      window.alert(`Failed to read source: ${err}`)
+    }
+  }
+
   async function refreshSourceState(pp: string) {
     await loadSources()
     const tree = await listDirectory(pp)
@@ -316,6 +334,37 @@ export function SourcesView() {
       window.alert(`Failed to drop selected sources: ${err}`)
     } finally {
       setBatchDeleting(false)
+    }
+  }
+
+  async function handlePermanentDelete(node: FileNode) {
+    if (!project || permanentlyDeletingPath) return
+    const pp = normalizePath(project.path)
+    const confirmed = window.confirm(
+      t("sources.permanentDeleteConfirm", { name: node.name }),
+    )
+    if (!confirmed) return
+
+    setPermanentlyDeletingPath(node.path)
+    try {
+      await permanentlyDeleteSourceNode(pp, node)
+      await refreshSourceState(pp)
+      setSelectedPaths((prev) => {
+        const next = new Set(prev)
+        next.delete(node.path)
+        return next
+      })
+      if (lastSelectedPath === node.path) {
+        setLastSelectedPath(null)
+      }
+      if (selectedFile === node.path) {
+        setSelectedFile(null)
+      }
+    } catch (err) {
+      console.error("Failed to permanently delete source:", err)
+      window.alert(`Failed to permanently delete source: ${err}`)
+    } finally {
+      setPermanentlyDeletingPath(null)
     }
   }
 
@@ -674,10 +723,13 @@ export function SourcesView() {
               onContextMenu={handleSourceContextMenu}
               onIngest={handleIngest}
               onDelete={handleDelete}
+              onExtractReferences={handleExtractReferences}
+              onPermanentDelete={handlePermanentDelete}
               onRestore={handleRestore}
               selectedPaths={selectedPaths}
               sourceStatuses={sourceStatuses}
               queueingPath={queueingPath}
+              permanentlyDeletingPath={permanentlyDeletingPath}
               depth={0}
             />
           </div>
@@ -693,6 +745,7 @@ export function SourcesView() {
           queueingPath={queueingPath}
           batchQueueing={batchQueueing}
           batchDeleting={batchDeleting}
+          permanentlyDeletingPath={permanentlyDeletingPath}
           onOpen={(node) => {
             closeContextMenu()
             void handleOpenSource(node)
@@ -700,6 +753,10 @@ export function SourcesView() {
           onIngest={(node) => {
             closeContextMenu()
             void handleIngest(node)
+          }}
+          onExtractReferences={(node) => {
+            closeContextMenu()
+            void handleExtractReferences(node)
           }}
           onBatchIngest={() => {
             closeContextMenu()
@@ -712,6 +769,10 @@ export function SourcesView() {
           onDropSelected={() => {
             closeContextMenu()
             void handleDeleteSelected()
+          }}
+          onPermanentDelete={(node) => {
+            closeContextMenu()
+            void handlePermanentDelete(node)
           }}
           onRestore={(node) => {
             closeContextMenu()
@@ -745,6 +806,21 @@ export function SourcesView() {
         <div className="pointer-events-none absolute inset-3 z-40 flex items-center justify-center rounded-xl border-2 border-dashed border-primary bg-background/80 text-sm font-medium text-primary shadow-inner backdrop-blur-sm">
           Drop files or folders to import
         </div>
+      )}
+
+      {project && referenceDialog && (
+        <ReferenceImportDialog
+          open
+          projectPath={normalizePath(project.path)}
+          node={referenceDialog.node}
+          sourceContent={referenceDialog.content}
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) setReferenceDialog(null)
+          }}
+          onImported={() => {
+            void loadSources()
+          }}
+        />
       )}
 
       <div className="shrink-0 border-t px-4 py-2 text-xs text-muted-foreground">
@@ -902,6 +978,69 @@ function isDroppedSource(projectPath: string, filePath: string): boolean {
   return relPath === "drop" || relPath.startsWith("drop/")
 }
 
+function extractSourcesFromFrontmatter(content: string): string[] {
+  const fmMatch = content.match(/^---\n([\s\S]*?)\n---/)
+  const fm = fmMatch ? fmMatch[1] : ""
+  const sources: string[] = []
+  const blockMatch = fm.match(/^sources:\s*\n((?:\s+-\s+.+\n?)*)/m)
+  if (blockMatch) {
+    for (const line of blockMatch[1].split("\n")) {
+      const itemMatch = line.match(/^\s+-\s+["']?(.+?)["']?\s*$/)
+      if (itemMatch) sources.push(itemMatch[1])
+    }
+    return sources
+  }
+
+  const inlineMatch = fm.match(/^sources:\s*\[([^\]]*)\]/m)
+  if (inlineMatch) {
+    for (const item of inlineMatch[1].split(",")) {
+      const trimmed = item.trim().replace(/^["']|["']$/g, "")
+      if (trimmed) sources.push(trimmed)
+    }
+  }
+  return sources
+}
+
+function removeSourceFromFrontmatter(content: string, sourceName: string): string {
+  const nextSources = extractSourcesFromFrontmatter(content).filter((source) => source !== sourceName)
+  if (nextSources.length === 0) return content
+
+  if (/^sources:\s*\n(?:\s+-\s+.+\n?)*/m.test(content)) {
+    return content.replace(
+      /^sources:\s*\n(?:\s+-\s+.+\n?)*/m,
+      `sources:\n${nextSources.map((source) => `  - "${source}"`).join("\n")}\n`,
+    )
+  }
+
+  if (/^sources:\s*\[[^\]]*\]/m.test(content)) {
+    return content.replace(
+      /^sources:\s*\[[^\]]*\]/m,
+      `sources: [${nextSources.map((source) => `"${source}"`).join(", ")}]`,
+    )
+  }
+
+  return content
+}
+
+async function permanentlyDeleteSourceNode(projectPath: string, node: FileNode): Promise<void> {
+  const relatedPages = await findRelatedWikiPages(projectPath, node.name)
+  for (const pagePath of relatedPages) {
+    const content = await readFile(pagePath)
+    const pageSources = extractSourcesFromFrontmatter(content)
+    if (!pageSources.includes(node.name)) continue
+
+    if (pageSources.length <= 1) {
+      await deleteFile(pagePath)
+      continue
+    }
+
+    await writeFile(pagePath, removeSourceFromFrontmatter(content, node.name))
+  }
+
+  await removeFromIngestCache(projectPath, node.name)
+  await deleteFile(node.path)
+}
+
 function DropUndoToast({
   count,
   onUndo,
@@ -1027,10 +1166,13 @@ function SourceTree({
   onContextMenu,
   onIngest,
   onDelete,
+  onExtractReferences,
+  onPermanentDelete,
   onRestore,
   selectedPaths,
   sourceStatuses,
   queueingPath,
+  permanentlyDeletingPath,
   depth,
 }: {
   nodes: FileNode[]
@@ -1039,10 +1181,13 @@ function SourceTree({
   onContextMenu: (node: FileNode, event: MouseEvent<HTMLElement>) => void
   onIngest: (node: FileNode) => void
   onDelete: (node: FileNode) => void
+  onExtractReferences: (node: FileNode) => void
+  onPermanentDelete: (node: FileNode) => void
   onRestore: (node: FileNode) => void
   selectedPaths: Set<string>
   sourceStatuses: Record<string, SourceStatus>
   queueingPath: string | null
+  permanentlyDeletingPath: string | null
   depth: number
 }) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
@@ -1084,10 +1229,13 @@ function SourceTree({
                   onContextMenu={onContextMenu}
                   onIngest={onIngest}
                   onDelete={onDelete}
+                  onExtractReferences={onExtractReferences}
+                  onPermanentDelete={onPermanentDelete}
                   onRestore={onRestore}
                   selectedPaths={selectedPaths}
                   sourceStatuses={sourceStatuses}
                   queueingPath={queueingPath}
+                  permanentlyDeletingPath={permanentlyDeletingPath}
                   depth={depth + 1}
                 />
               )}
@@ -1133,6 +1281,16 @@ function SourceTree({
               variant="ghost"
               size="icon"
               className="h-7 w-7 shrink-0"
+              title="Extract referenced papers"
+              disabled={dropped || permanentlyDeletingPath === node.path}
+              onClick={() => onExtractReferences(node)}
+            >
+              <Search className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0"
               title={dropped ? "Dropped sources cannot be ingested" : ingestable ? status === "ingested" ? "Re-ingest source" : "Add to ingest queue" : "Not ingestable"}
               disabled={dropped || !ingestable || queueingPath === node.path}
               onClick={() => onIngest(node)}
@@ -1143,11 +1301,24 @@ function SourceTree({
               variant="ghost"
               size="icon"
               className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
-              title={dropped ? "Restore from Drop" : "Move to Drop"}
+              title={permanentlyDeletingPath === node.path ? "Deleting permanently" : dropped ? "Restore from Drop" : "Move to Drop"}
+              disabled={permanentlyDeletingPath === node.path}
               onClick={() => dropped ? onRestore(node) : onDelete(node)}
             >
               {dropped ? <RotateCcw className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
             </Button>
+            {!dropped && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+                title="Delete permanently"
+                disabled={permanentlyDeletingPath === node.path}
+                onClick={() => onPermanentDelete(node)}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            )}
           </div>
         )
       })}
@@ -1163,11 +1334,14 @@ function SourceContextMenu({
   queueingPath,
   batchQueueing,
   batchDeleting,
+  permanentlyDeletingPath,
   onOpen,
   onIngest,
+  onExtractReferences,
   onBatchIngest,
   onDrop,
   onDropSelected,
+  onPermanentDelete,
   onRestore,
   onRestoreSelected,
   onReveal,
@@ -1181,11 +1355,14 @@ function SourceContextMenu({
   queueingPath: string | null
   batchQueueing: boolean
   batchDeleting: boolean
+  permanentlyDeletingPath: string | null
   onOpen: (node: FileNode) => void
   onIngest: (node: FileNode) => void
+  onExtractReferences: (node: FileNode) => void
   onBatchIngest: () => void
   onDrop: (node: FileNode) => void
   onDropSelected: () => void
+  onPermanentDelete: (node: FileNode) => void
   onRestore: (node: FileNode) => void
   onRestoreSelected: () => void
   onReveal: (node: FileNode) => void
@@ -1210,9 +1387,12 @@ function SourceContextMenu({
           node={single}
           status={sourceStatuses[single.path] ?? "unprocessed"}
           queueingPath={queueingPath}
+          permanentlyDeletingPath={permanentlyDeletingPath}
           onOpen={onOpen}
           onIngest={onIngest}
+          onExtractReferences={onExtractReferences}
           onDrop={onDrop}
+          onPermanentDelete={onPermanentDelete}
           onRestore={onRestore}
           onReveal={onReveal}
           onCopyPath={(node) => onCopyPaths([node])}
@@ -1255,9 +1435,12 @@ function SingleSourceContextMenuItems({
   node,
   status,
   queueingPath,
+  permanentlyDeletingPath,
   onOpen,
   onIngest,
+  onExtractReferences,
   onDrop,
+  onPermanentDelete,
   onRestore,
   onReveal,
   onCopyPath,
@@ -1265,9 +1448,12 @@ function SingleSourceContextMenuItems({
   node: FileNode
   status: SourceStatus
   queueingPath: string | null
+  permanentlyDeletingPath: string | null
   onOpen: (node: FileNode) => void
   onIngest: (node: FileNode) => void
+  onExtractReferences: (node: FileNode) => void
   onDrop: (node: FileNode) => void
+  onPermanentDelete: (node: FileNode) => void
   onRestore: (node: FileNode) => void
   onReveal: (node: FileNode) => void
   onCopyPath: (node: FileNode) => void
@@ -1288,6 +1474,11 @@ function SingleSourceContextMenuItems({
           {ingestable ? status === "ingested" ? "Re-ingest" : "Ingest" : "Not ingestable"}
         </ContextMenuItem>
       )}
+      {!dropped && (
+        <ContextMenuItem onClick={() => onExtractReferences(node)}>
+          Extract References
+        </ContextMenuItem>
+      )}
       <ContextMenuItem onClick={() => onReveal(node)}>
         Reveal in Folder
       </ContextMenuItem>
@@ -1304,6 +1495,13 @@ function SingleSourceContextMenuItems({
           Move to Drop
         </ContextMenuItem>
       )}
+      <ContextMenuItem
+        disabled={permanentlyDeletingPath === node.path}
+        destructive
+        onClick={() => onPermanentDelete(node)}
+      >
+        {permanentlyDeletingPath === node.path ? "Deleting..." : "Delete Permanently"}
+      </ContextMenuItem>
     </>
   )
 }
